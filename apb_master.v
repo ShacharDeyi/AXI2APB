@@ -1,10 +1,11 @@
 /*------------------------------------------------------------------------------
- * File          : apb_master.v
+ * File          : apb_master.sv
  * Project       : RTL
  * Author        : epsdso
- * Creation date : Nov 1, 2025
+ * Creation date : Nov 3, 2025
  * Description   :
  *------------------------------------------------------------------------------*/
+
 
 module apb_master #(
 	parameter PADDR_WIDTH = 32,
@@ -99,5 +100,3 @@ always_comb begin
 	endcase
   end
 endmodule : apb_master
-	
-endmodule

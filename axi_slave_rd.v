@@ -1,8 +1,8 @@
 /*------------------------------------------------------------------------------
- * File          : axi_slave_rd.v
+ * File          : axi_slave_rd.sv
  * Project       : RTL
  * Author        : epsdso
- * Creation date : Nov 1, 2025
+ * Creation date : Nov 3, 2025
  * Description   :
  *------------------------------------------------------------------------------*/
 

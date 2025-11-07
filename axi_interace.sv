@@ -15,36 +15,36 @@ interface axi_interface #(
 );
 
 	// Write Address Channel
-	wire                      awvalid; /*Valid indicator*/
-	wire [ADDR_WIDTH-1:0]     awaddr; /*Transaction address*/
-	wire [ID_WIDTH-1:0]       awid; /*Transaction identifier for the write channels*/
-	wire                      awready; /*Ready indicator*/
+	logic                      awvalid; /*Valid indicator*/
+	logic [ADDR_WIDTH-1:0]     awaddr; /*Transaction address*/
+	logic [ID_WIDTH-1:0]       awid; /*Transaction identifier for the write channels*/
+	logic                      awready; /*Ready indicator*/
 
 	// Write Data Channel
-	wire                      wvalid; /*Valid indicator*/ 
-	wire [DATA_WIDTH-1:0]     wdata; /*DATA_WIDTH*/
-	wire                      wlast; /*Last write data*/
-	wire                      wready; /*Ready indicator*/
+	logic                      wvalid; /*Valid indicator*/ 
+	logic [DATA_WIDTH-1:0]     wdata; /*DATA_WIDTH*/
+	logic                      wlast; /*Last write data*/
+	logic                      wready; /*Ready indicator*/
 
 	// Write Response Channel 
-	wire                      bvalid; /*Valid indicator*/
-	wire [BRESP_WIDTH-1:0]    bresp; /*Write response*/
-	wire [ID_WIDTH-1:0]       bid; /*Transaction identifier for the write channels*/
-	wire                      bready; /*Ready indicator*/
+	logic                      bvalid; /*Valid indicator*/
+	logic [BRESP_WIDTH-1:0]    bresp; /*Write response*/
+	logic [ID_WIDTH-1:0]       bid; /*Transaction identifier for the write channels*/
+	logic                      bready; /*Ready indicator*/
 
 	// Read Address Channel
-	wire                      arvalid; /*Valid indicator*/
-	wire [ADDR_WIDTH-1:0]     araddr; /*Transaction address*/
-	wire [ID_WIDTH-1:0]       arid; /*Transaction identifier for the write channels*/
-	wire                      arready; /*Ready indicator*/
+	logic                      arvalid; /*Valid indicator*/
+	logic [ADDR_WIDTH-1:0]     araddr; /*Transaction address*/
+	logic [ID_WIDTH-1:0]       arid; /*Transaction identifier for the write channels*/
+	logic                      arready; /*Ready indicator*/
 
 	// Read Data Channel
-	wire                      rvalid;
-	wire [DATA_WIDTH-1:0]     rdata;
-	wire                      rlast;
-	wire [RRESP_WIDTH-1:0]    rresp;
-	wire [ID_WIDTH-1:0]       rid;
-	wire                      rready;
+	logic                      rvalid;
+	logic [DATA_WIDTH-1:0]     rdata;
+	logic                      rlast;
+	logic [RRESP_WIDTH-1:0]    rresp;
+	logic [ID_WIDTH-1:0]       rid;
+	logic                      rready;
 
 	// Master modport
 	modport master (

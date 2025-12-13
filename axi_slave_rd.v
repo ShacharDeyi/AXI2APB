@@ -27,6 +27,7 @@ module axi_slave_rd #(
 
 	// APB bridge controller
 	input 	logic 					req_ready, //can send new request
+	output  logic                	rsp_ready,   // ready to receive the response from fifo
 	output  logic                	req_valid,   // new request available
 	output  logic [ADDR_WIDTH-1:0] 	req_addr,
 	output  logic                	req_read,   // 1=write, 0=read
@@ -34,88 +35,92 @@ module axi_slave_rd #(
 	
 );
 
-typedef enum logic [1:0] {
-	IDLE,
-	REQUEST,
-	RESPONSE,
-	DATA
-} axi_state_e;
+parameter FSM_WIDTH = 2;
+parameter IDLE = 2'b00;
+parameter REQUEST = 2'b01;
+parameter RESPONSE = 2'b10;
+parameter DATA = 2'b11;
 
-axi_state_e state, next_state;
+logic 	[FSM_WIDTH-1:0] prev_state;
+logic	[FSM_WIDTH-1:0] next_state;
+
+wire idle2request =  axi.arvalid & axi.arready;
+wire request2response = req_ready; 
+wire response2data = rsp_valid;
+wire data2reponse = axi.rready & ~is_last;
+wire data2idle = axi.rready & is_last;
+
+always @(prev_state or idle2request or request2response or response2data or data2reponse or data2idle)
+	case (prev_state)
+		IDLE: next_state = idle2request ? REQUEST : IDLE;
+		REQUEST: next_state = request2response ? RESPONSE : REQUEST;
+		RESPONSE: next_state = response2data ? DATA : RESPONSE;
+		DATA: next_state = 	data2reponse ? RESPONSE :
+							data2idle ? IDLE : DATA;
+		default: next_state = {FSM_WIDTH{1'bx}};
+	endcase
 
 always_ff @(posedge clk or negedge rst_n) begin
 	if (!rst_n)
-	  state <= IDLE;
+		prev_state <= IDLE;
 	else
-	  state <= next_state;
+		prev_state <= next_state;
 end
 
-always_comb begin
-	axi.arready = 1'b0; 
-	axi.rvalid = axi.rvalid;
-	axi.rdata =  axi.rdata;
-	axi.rlast = 1'b0;
-	axi.rresp = axi.rresp;
-	axi.rid = axi.rid;
 
-	
-	req_valid = 1'b0;
-	req_addr = req_addr;
-	req_read = 1'b0;
-	req_id = req_id;
-	next_state  = state;
-
-	
-	case(state)
-		IDLE: begin
-			axi.arready = 1'b1; 
-			req_addr = '0;
-			req_id = '0;
-			axi.rvalid = '0;
-			axi.rdata = '0;
-			axi.rresp  = '0;
-			axi.rid = '0;
-			
-			req_valid = axi.arvalid; //pass forward
-			if (axi.arvalid) begin
-				req_addr = axi.araddr;
-				req_id = axi.arid;
-				next_state = REQUEST;
-			end
-		end
+always_ff @(posedge clk or negedge rst_n) begin
+	if (!rst_n) begin
 		
-		REQUEST: begin
-//			if(req_ready) begin 
-				req_valid = 1'b1;
-				next_state = RESPONSE;	
-// 			end
-		end
-		//wait for queue 
-		RESPONSE: begin
-			//tell queue I'm ready to receive
-			if(rsp_valid) begin
-				//pop the queue, check how to actually remove from queue
-				axi.rdata = rsp_rdata;
-				axi.rid = rsp_id;
-				axi.rresp = rsp_rresp;
-				next_state = DATA;
-			end	
-		end		
+		axi.arready <= 1'b0;
+		axi.rvalid <= 1'b0;
+		axi.rdata <= '0;
+		axi.rresp <= '0;
+		axi.rid <= '0;
+		axi.rlast <= 1'b0;
 		
-		DATA: begin
-			axi.rvalid = 1'b1;
-			if (axi.rready) begin
-				if(is_last) begin
-					axi.rlast = 1'b1;
-					next_state = IDLE;
-				end
-				else begin
-					next_state = RESPONSE;
+		req_valid <= 1'b0;
+		req_addr <= '0;
+		req_id <= '0;
+		req_read <= 1'b0;
+		rsp_ready <= 1'b0;
+		
+	end else begin
+		axi.arready <= 1'b0;
+		axi.rvalid <= 1'b0;
+		axi.rlast <= 1'b0;
+		
+		req_valid <= 1'b0;
+		rsp_ready <= 1'b0;
+		
+		case (prev_state)
+			IDLE: begin
+				axi.arready <= 1'b1;	
+				axi.rdata <= '0;
+				if(idle2request) begin
+					req_valid <= 1'b1;
+					req_id <= axi.arid;
+					req_addr <= axi.araddr;
 				end
 			end
-		end
-		
-	endcase
+			REQUEST: begin
+				req_valid <= 1'b1;
+				//add fifo logic - to send package
+			end
+			RESPONSE: begin
+				//add fifo logic - to receive package
+				rsp_ready <= 1'b1;
+				if(response2data) begin
+					axi.rdata <= rsp_rdata;
+					axi.rid <= rsp_id;
+					axi.rresp <= rsp_rresp;
+				end
+			end
+			DATA: begin
+				axi.rvalid <= 1'b1;
+				if (data2idle)
+					axi.rlast <= 1'b1;
+			end
+		endcase
+	end
 end
-	
 endmodule

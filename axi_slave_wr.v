@@ -27,105 +27,106 @@ module axi_slave_wr #(
 	output  logic [ADDR_WIDTH-1:0] 	req_addr,
 	output  logic [DATA_WIDTH-1:0] 	req_wdata,
 	output  logic                	req_write,   // 1=write, 0=read
-	output 	logic [ID_WIDTH-1:0] 	req_id
+	output 	logic [ID_WIDTH-1:0] 	req_id,
+	output 	logic 					rsp_ready
 
 	
 );
 
 logic is_last_i;
 
+parameter FSM_WIDTH = 3;
+parameter IDLE = 3'b000;
+parameter REQUEST = 3'b001;
+parameter DATA = 3'b010;
+parameter RECEIVE = 3'b011;
+parameter RESPONSE = 3'b100;
 
-typedef enum logic [1:0] {
-	IDLE,
-	REQUEST,
-	DATA,
-	RESPONSE
-} axi_state_e;
+logic 	[FSM_WIDTH-1:0] prev_state;
+logic	[FSM_WIDTH-1:0] next_state;
 
-axi_state_e state, next_state;
+wire idle2request =  axi.awvalid & axi.awready;
+wire request2data = axi.wready & axi.wvalid; 
+wire data2request = req_ready & ~axi.wlast;
+wire data2receive = req_ready & axi.wlast;
+wire receive2response = rsp_ready & rsp_valid;
+wire reponse2idle = axi.bready & axi.bvalid;
+
+always @(prev_state or idle2request or request2data or data2request or data2receive or receive2response or reponse2idle)
+	case (prev_state)
+		IDLE: next_state = idle2request ? REQUEST : IDLE;
+		REQUEST: next_state = request2data ? DATA : REQUEST;
+		DATA: next_state = 	data2request ? REQUEST : 
+							data2receive ? RECEIVE : DATA;
+		RECEIVE: next_state = receive2response ? RESPONSE : RECEIVE;
+		RESPONSE: next_state = 	reponse2idle ? IDLE : RESPONSE;
+		default: next_state = {FSM_WIDTH{1'bx}};
+	endcase
+
+always_ff @(posedge clk or negedge rst_n) begin
+	if (!rst_n)
+		prev_state <= IDLE;
+	else
+		prev_state <= next_state;
+end
+
+
 
 always_ff @(posedge clk or negedge rst_n) begin
 	if (!rst_n) begin
-	  state <= IDLE;
-	end
-	else
-	  state <= next_state;
-end
-
-always_comb begin
-	
-	axi.awready = 1'b0;
-	axi.wready = 1'b0;
-	axi.bvalid = axi.bvalid;
-	axi.bresp = '0;
-	axi.bid = '0;
-	
-	req_valid = 1'b0;
-	req_addr = req_addr;
-	req_wdata = req_wdata;
-	req_write = 1'b1;
-	req_id = req_id;
-	next_state  = state;
-	is_last_i = is_last_i;
-
-	
-	
-	case (state)
-		IDLE: begin
-			is_last_i = 1'b0;
-			axi.awready = 1'b1;
-			axi.bvalid = 1'b0;
-			req_valid = axi.awvalid;
-			req_addr = 32'b0;
-			req_wdata = 64'b0;
-			req_id = 32'b0;
-			if (axi.awvalid) begin
-				req_addr = axi.awaddr;
-				req_id = axi.awid;	
-				next_state = REQUEST;
-			end
-		end
 		
-		REQUEST: begin
-
-			axi.wready = 1'b1;
-			if(axi.wvalid) begin
-				req_wdata = axi.wdata;
-				is_last_i = axi.wlast;
-				next_state = DATA;
-			end
-		end
+		axi.awready <= 1'b0;
+		axi.bvalid <= 1'b0;
+		axi.wready <= 1'b0;
+		axi.bresp <= '0;
+		axi.bid <= '0;
+				
+		req_valid <= 1'b0;
+		req_addr <= '0;
+		req_wdata <= '0;
+		req_write <= 1'b1;
+		req_id <= '0;
 		
-		DATA: begin
-			//prepare data
-//			if(req_ready) begin 
-				req_valid = 1'b1;
-				if(!is_last_i) begin // add response from queue?
-					//push the queue
-					next_state = REQUEST;
+	end else begin
+		axi.awready <= 1'b0;
+		axi.bvalid <= 1'b0;	
+		
+		req_valid <= 1'b0;
+		rsp_ready <= 1'b0;
+		
+		case(prev_state)
+			IDLE: begin
+				axi.awready <= 1'b1;
+				if (idle2request) begin
+					req_addr <= axi.awaddr;
+					req_id <= axi.awid;	
 				end
-				else begin
-					next_state = RESPONSE;
-				end	
-//			end
-		end
-		
-		
-		RESPONSE: begin
-			if(rsp_valid) begin
-				axi.bvalid = rsp_valid;
 			end
-
-			if(rsp_valid) begin
-				if(axi.bready) begin
+			REQUEST: begin
+				req_valid <= 1'b1;
+				axi.wready <= 1'b1;
+				if (request2data) begin
+					req_wdata <= axi.wdata;
+				end
+			end
+			DATA: begin
+				req_valid = 1'b1;
+				if (req_ready) begin
+				//push queue
+				end
+			end
+			RECEIVE: begin
+				rsp_ready <= 1'b1;
+				if (receive2response) begin
+					axi.bvalid = 1'b1;
 					axi.bresp = 2'b0;   //'okay'
 					axi.bid = rsp_id;
-					next_state = IDLE;
 				end
 			end
-			
-		end
-	endcase
+			RESPONSE: begin
+				axi.bvalid = 1'b1;
+			end
+		endcase
+	end
 end
-	
 endmodule

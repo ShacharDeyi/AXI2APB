@@ -47,15 +47,15 @@ logic	[FSM_WIDTH-1:0] next_state;
 wire idle2request =  axi.arvalid & axi.arready;
 wire request2response = req_ready; 
 wire response2data = rsp_valid;
-wire data2reponse = axi.rready & ~is_last;
+wire data2response = axi.rready & ~is_last;
 wire data2idle = axi.rready & is_last;
 
-always @(prev_state or idle2request or request2response or response2data or data2reponse or data2idle)
+always @(prev_state or idle2request or request2response or response2data or data2response or data2idle)
 	case (prev_state)
 		IDLE: next_state = idle2request ? REQUEST : IDLE;
 		REQUEST: next_state = request2response ? RESPONSE : REQUEST;
 		RESPONSE: next_state = response2data ? DATA : RESPONSE;
-		DATA: next_state = 	data2reponse ? RESPONSE :
+		DATA: next_state = 	data2response ? RESPONSE :
 							data2idle ? IDLE : DATA;
 		default: next_state = {FSM_WIDTH{1'bx}};
 	endcase

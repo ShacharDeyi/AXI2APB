@@ -3,16 +3,16 @@
  * Project       : RTL
  * Author        : epsdso
  * Creation date : Dec 18, 2025
- * Description   :
+ * Description   : different sturcts to use in our bridge
  *------------------------------------------------------------------------------*/
 
 package struct_types;
 
-	parameter ADDR_WIDTH    = 32,
-	parameter DATA_WIDTH    = 64,
-	parameter ID_WIDTH      = 32,
-	parameter RRESP_WIDTH   = 2,
-	parameter BRESP_WIDTH   = 2,
+	parameter ADDR_WIDTH    = 32;
+	parameter DATA_WIDTH    = 64;
+	parameter ID_WIDTH      = 32;
+	parameter RRESP_WIDTH   = 2;
+	parameter BRESP_WIDTH   = 2;
 	
 	parameter PADDR_WIDTH = 32;
 	parameter PDATA_WIDTH = 32; //should be 32, might need 64 for compatibility while testing

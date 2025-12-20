@@ -1,54 +1,124 @@
 /*------------------------------------------------------------------------------
- * File          : apb_interface.sv
+ * File          : axi_interface.sv
  * Project       : RTL
  * Author        : epsdso
  * Creation date : Jul 5, 2025
  * Description   :
  *------------------------------------------------------------------------------*/
 
-// APB4 interfcae
-interface apb_interface();	
-//APB interface
-	parameter PADDR_WIDTH = 32;
-	parameter PDATA_WIDTH = 32; //should be 32, might need 64 for compatibility while testing
-	parameter PSTRB_WIDTH = 4; 
-	
-	
-	logic [PADDR_WIDTH-1:0] 	paddr; 		/*TRANSACTION ADDRESS*/
-	logic 						psel; 		/*The Requester generates a PSELx signal for each Completer. PSELx indicates that the Completer is selected and that a data transfer is required.*/
-	logic 						penable; 	/*PENABLE indicates the second and subsequent cycles of an APB transfer.*/
-	logic 						pwrite; 	/*PWRITE INDICATES AN APB WRITE ACCESS WHEN HIGH AND AN APB READ ACCESS WHEN LOW.*/
-	logic [PDATA_WIDTH-1:0] 	pwdata; 	/*The PWDATA write data bus is driven by the APB bridge Requester during write cycles when PWRITE is HIGH. */
-	logic [PSTRB_WIDTH-1:0] 	pstrb;		/*PSTRB indicates which byte lanes to update during a write transfer*/
-	logic 						pready;
-	logic [PDATA_WIDTH-1:0] 	prdata; 	/*The PRDATA read data bus is driven by the selected Completer during read cycles when PWRITE is LOW.*/
-	logic 						pslverr; 	/*PSLVERR is an optional signal that can be asserted HIGH by the Completer to indicate an error condition on an APB transfer.*/ 
-	
-	modport slave (
-		
-		input paddr,
-		input psel,
-		input penable,
-		input pwdata,
-		input pwrite,
-		input pstrb,
+interface axi_interface #(
+	parameter ADDR_WIDTH    = 32,
+	parameter DATA_WIDTH    = 64,
+	parameter ID_WIDTH      = 32,
+	parameter RRESP_WIDTH   = 2,
+	parameter BRESP_WIDTH   = 2
+);
 
-		output pready,
-		output prdata,
-		output pslverr
-	);
-	
+	// Write Request Channel
+	logic                      awvalid; /*Valid indicator*/
+	logic                      awready; /*Ready indicator*/
+	logic [ID_WIDTH-1:0]       awid; /*Transaction identifier for the write channels*/
+	logic [ADDR_WIDTH-1:0]     awaddr; /*Transaction address*/
+	logic 					   awlen; /*Defines the number of data transfers in a transaction*/
+
+	// Write Data Channel
+	logic                      	wvalid; /*Valid indicator*/ 
+	logic                      	wready; /*Ready indicator*/
+	logic [DATA_WIDTH-1:0]     	wdata; /*DATA_WIDTH*/
+	logic [DATA_WIDTH/8-1:0]	wstrb; /*PSTRB indicates which byte lanes to update during a write transfer*/
+	logic                      	wlast; /*Last write data*/
+
+	// Write Response Channel 
+	logic                      	bvalid; /*Valid indicator*/
+	logic                      	bready; /*Ready indicator*/
+	logic [ID_WIDTH-1:0]       	bid; /*Transaction identifier for the write channels*/
+	logic [BRESP_WIDTH-1:0]    	bresp; /*Write response*/
+
+
+
+	// Read Request Channel
+	logic                      	arvalid; /*Valid indicator*/
+	logic                      	arready; /*Ready indicator*/
+	logic [ID_WIDTH-1:0]       	arid; /*Transaction identifier for the write channels*/
+	logic [ADDR_WIDTH-1:0]     	araddr; /*Transaction address*/
+	logic						arlen; /*Defines the number of data transfers in a transaction*/
+
+
+	// Read Data Channel
+	logic                      rvalid;
+	logic                      rready;
+	logic [ID_WIDTH-1:0]       rid;
+	logic [DATA_WIDTH-1:0]     rdata;
+	logic [RRESP_WIDTH-1:0]    rresp;
+	logic                      rlast;
+
+
+
+
+	// Master modport
 	modport master (
-		output paddr,
-		output psel, 
-		output penable,
-		output pwdata,
-		output pwrite,
-		output pstrb,
+		output awvalid,
+		output awaddr,
+		output awid,
+		output awlen,
+		input  awready,
 
-		input pready, 
-		input prdata, 
-		input pslverr
+		output wvalid,
+		output wdata,
+		output wstrb,
+		output wlast,
+		input  wready,
+
+		input  bvalid,
+		input  bresp,
+		input  bid,
+		output bready,
+
+		output arvalid,
+		output araddr,
+		output arid,
+		output arlen,
+		input  arready,
+
+		input  rvalid,
+		input  rdata,
+		input  rlast,
+		input  rresp,
+		input  rid,
+		output rready
 	);
-			
-endinterface: apb_interface
+
+	// Slave modport
+	modport slave (
+		input  awvalid,
+		input  awaddr,
+		input  awid,
+		input  awlen,
+		output awready,
+
+		input  wvalid,
+		input  wdata,
+		input  wstrb,
+		input  wlast,
+		output wready,
+
+		output bvalid,
+		output bresp,
+		output bid,
+		input  bready,
+
+		input  arvalid,
+		input  araddr,
+		input  arid,
+		input  arlen,
+		output arready,
+
+		output rvalid,
+		output rdata,
+		output rlast,
+		output rresp,
+		output rid,
+		input  rready
+	);
+
+endinterface : axi_interface

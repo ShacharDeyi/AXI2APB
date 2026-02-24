@@ -56,6 +56,6 @@ typedef struct packed {
 	logic 						pready;
 	logic [PDATA_WIDTH-1:0] 	prdata; 	/*The PRDATA read data bus is driven by the selected Completer during read cycles when PWRITE is LOW.*/
 	logic 						pslverr; 	/*PSLVERR is an optional signal that can be asserted HIGH by the Completer to indicate an error condition on an APB transfer.*/ 
-} apb;
+} apb_struct;
 
 endpackage

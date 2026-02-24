@@ -114,8 +114,8 @@ module tb;
 		wait (reset == 0);
 		@(posedge clk);
 		
-		axi_write_burst(32'h000_1000, 32'h1, 4, 64'hDEAD_BEEF_0000_0000);
-		repeat(4) @(posedge clk);
+//		axi_write_burst(32'h000_1000, 32'h1, 4, 64'hDEAD_BEEF_0000_0000);
+//		repeat(4) @(posedge clk);
 		axi_read_burst(32'h0000_1000, 32'h1, 4);
 		
 		$finish;

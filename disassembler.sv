@@ -12,53 +12,43 @@ import struct_types::*;
 (
 	input  logic      clk,
 	input  logic      rst_n,
-	
-	// Ports to talk to the input FIFO (from axi_slave) sitting in the Top Module
-	output 	logic						req_pop_n,		
-	output 	logic						wr_data_pop_n,	
-	
+
 	input 	logic						is_wr, 			// wr = 1, rd = 0
-	input	logic						req_empty,		
-	input	logic						wr_data_empty,	
 	
 	input	struct_types::axi_rd_req	rd_req_fifo_out, 
 	input	struct_types::axi_wr_req	wr_req_fifo_out,
 	input 	struct_types::axi_wr_data 	wr_data_fifo_out,
 	
-	// Ports to talk to the output FIFO (to apb_master) sitting in the Top Module
-	output 	logic               		apb_req_push_n,
-	output 	struct_types::apb_struct 	apb_req_fifo_in,
-	input  	logic              			apb_req_full
+	output	struct_types::apb_struct 	apb_req_fifo_in_msb,
+	output 	logic						valid_msb,
+	output	struct_types::apb_struct 	apb_req_fifo_in_lsb,
+	output  logic 						valid_lsb
+
 	
 );
-/*------------------------------INPUT----------------------------------*/
-	// AXI Protocol Logic: Ready only if the FIFO has room
-	assign axi.arready = !req_fifo_full;
+/*------------------------------Save in RF----------------------------------*/
 
-	// Prepare the packet
 	always_comb begin
-		req_fifo_data_out.arid    = axi.arid;
-		req_fifo_data_out.araddr  = axi.araddr;
-		req_fifo_data_out.arlen   = axi.arlen;
+		
+		req.id 	= is_wr ? wr_req_fifo_out.awid : rd_req_fifo_out.arid;
+		req.addr  	= is_wr ? wr_req_fifo_out.awaddr :  rd_req_fifo_out.araddr;
+		req.wdata 	= wr_data_fifo_out.wdata;
+		
+	end
+	
+/*------------------------------Split into 2 apb requests----------------------------------*/
+
+	always_comb begin
+		apb_req_fifo_in_msb.paddr  = (is_wr ? wr_req_fifo_out.awaddr :  rd_req_fifo_out.araddr) + OFFSET_APB;
+		apb_req_fifo_in_msb.pwdata = wr_data_fifo_out.wdata[DATA_WIDTH-1:PDATA_WIDTH];
+		apb_req_fifo_in_msb.pstrb = wr_data_fifo_out.wstrb[WSTRB_WIDTH-1:PSTRB_WIDTH];
+		valid_msb = |wr_data_fifo_out.wstrb[WSTRB_WIDTH-1:PSTRB_WIDTH] | !is_wr; //read axi req translate always to 2 apb transactions
+
+		apb_req_fifo_in_lsb.paddr  = is_wr ? wr_req_fifo_out.awaddr :  rd_req_fifo_out.araddr;
+		apb_req_fifo_in_lsb.pwdata = wr_data_fifo_out.wdata[PDATA_WIDTH-1:0];
+		apb_req_fifo_in_lsb.pstrb = wr_data_fifo_out.wstrb[PSTRB_WIDTH-1:0];
+		valid_lsb = |wr_data_fifo_out.wstrb[PSTRB_WIDTH-1:0] | !is_wr;
 	end
 
-	// We push only when Valid and Ready handshake occurs
-	assign req_fifo_push_n = !(axi.arvalid && axi.arready);
-	
-	
-/*------------------------------OUTPUT----------------------------------*/	
-	// AXI Protocol Logic: Ready only if the FIFO has room
-	assign axi.rvalid = !data_fifo_empty;
-
-	// Prepare the packet
-	always_comb begin
-		axi.rid = data_fifo_data_in.rid;
-		axi.rdata = data_fifo_data_in.rdata;
-		axi.rresp = data_fifo_data_in.rresp;
-		axi.rlast = data_fifo_data_in.rlast;
-	end
-
-	// We push only when Valid and Ready handshake occurs
-	assign data_fifo_pop_n = !(axi.rvalid && axi.rready);
 
 endmodule

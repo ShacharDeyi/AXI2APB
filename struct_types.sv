@@ -8,11 +8,13 @@
 
 package struct_types;
 
-	parameter ADDR_WIDTH    = 32;
+	parameter ADDR_WIDTH    = 32; //bit
 	parameter DATA_WIDTH    = 64;
 	parameter ID_WIDTH      = 32;
 	parameter RRESP_WIDTH   = 2;
 	parameter BRESP_WIDTH   = 2;
+	parameter OFFSET_APB	= 32;
+	parameter WSTRB_WIDTH 	= 8;
 	
 	parameter PADDR_WIDTH = 32;
 	parameter PDATA_WIDTH = 32; //should be 32, might need 64 for compatibility while testing
@@ -26,7 +28,7 @@ typedef struct packed {
 
 typedef struct packed {
 	logic [DATA_WIDTH-1:0]     	wdata; /*DATA_WIDTH*/
-	logic [DATA_WIDTH/8-1:0]	wstrb; /*PSTRB indicates which byte lanes to update during a write transfer*/
+	logic [WSTRB_WIDTH-1:0]		wstrb; /*PSTRB indicates which byte lanes to update during a write transfer*/
 	logic                      	wlast; /*Last write data*/
 } axi_wr_data;
 

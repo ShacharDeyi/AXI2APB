@@ -3,7 +3,8 @@
  * Project       : RTL
  * Author        : epsdso
  * Creation date : Feb 24, 2026
- * Description   :
+ * Description   : Assembler module that combines 2 APB responses into 1 AXI 
+ *                 response. Handles both read (combine data) and write (pass response)
  *------------------------------------------------------------------------------*/
 
 module assembler 
@@ -13,7 +14,12 @@ import struct_types::*;
 	input  logic      clk,
 	input  logic      rst_n,
 	
-	// Ports to talk to the input FIFO (from apb_slave) sitting in the Top Module
+	// Control signals
+	input  logic                            is_wr,          // 1 for write, 0 for read
+	input  logic                            is_last,        // Last beat of burst
+	input  logic [ID_WIDTH-1:0]             transaction_id, // bid or rid
+	
+	// Ports to talk to the input FIFO (from apb_master) sitting in the Top Module
 	input	struct_types::apb_struct	apb_resp_fifo_out_msb, 
 	input	struct_types::apb_struct	apb_resp_fifo_out_lsb, 
 	
@@ -22,33 +28,25 @@ import struct_types::*;
 	output 	struct_types::axi_wr_resp 	wr_resp_fifo_in
 	
 );
-/*------------------------------Restore from RF----------------------------------*/
 
-	// Prepare the packet
+	/*=====================================================================*/
+	/*                    ASSEMBLE AXI RESPONSES                          */
+	/*=====================================================================*/
+	
+	// Read response: combine MSB and LSB APB responses into 64-bit read data
 	always_comb begin
-		if (is_wr) begin
-			wr_resp_fifo_in.arid    = axi.bid;
-			wr_resp_fifo_in.araddr  = axi.araddr;
-			wr_resp_fifo_in.arlen   = axi.arlen;
-		end
-
+		rd_data_fifo_in.rid = transaction_id;
+		rd_data_fifo_in.rdata = {apb_resp_fifo_out_msb.prdata, apb_resp_fifo_out_lsb.prdata};
+		rd_data_fifo_in.rlast = is_last;
+		// Response is OKAY (2'b00) unless either MSB or LSB has error
+		rd_data_fifo_in.rresp = (apb_resp_fifo_out_msb.pslverr | apb_resp_fifo_out_lsb.pslverr) ? 2'b10 : 2'b00;
 	end
 	
-	
-/*------------------------------Pack into 1 AXI response----------------------------------*/	
- 
-	// Prepare the packet
+	// Write response: pass through the response from APB (both should be same)
 	always_comb begin
-		if (is_wr) begin
-			axi_wr_resp.bid = 
-		end
-		axi.rid = data_fifo_data_in.rid;
-		axi.rdata = data_fifo_data_in.rdata;
-		axi.rresp = data_fifo_data_in.rresp;
-		axi.rlast = data_fifo_data_in.rlast;
+		wr_resp_fifo_in.bid = transaction_id;
+		// Response is OKAY (2'b00) unless either MSB or LSB has error
+		wr_resp_fifo_in.bresp = (apb_resp_fifo_out_msb.pslverr | apb_resp_fifo_out_lsb.pslverr) ? 2'b10 : 2'b00;
 	end
-
-	// We push only when Valid and Ready handshake occurs
-	assign data_fifo_pop_n = !(axi.rvalid && axi.rready);
 
 endmodule

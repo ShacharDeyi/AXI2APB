@@ -5,6 +5,7 @@
  * Creation date : Nov 3, 2025
  * Description   : pushes write requests
  *------------------------------------------------------------------------------*/
+`timescale 1ns/1ps
 
 module axi_slave_wr 
 import struct_types::*;

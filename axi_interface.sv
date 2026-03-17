@@ -5,6 +5,7 @@
  * Creation date : Jul 5, 2025
  * Description   :
  *------------------------------------------------------------------------------*/
+`timescale 1ns/1ps
 
 interface axi_interface #(
 	parameter ADDR_WIDTH    = 32,
@@ -19,7 +20,7 @@ interface axi_interface #(
 	logic                      awready; /*Ready indicator*/
 	logic [ID_WIDTH-1:0]       awid; /*Transaction identifier for the write channels*/
 	logic [ADDR_WIDTH-1:0]     awaddr; /*Transaction address*/
-	logic 					   awlen; /*Defines the number of data transfers in a transaction*/
+	logic [7:0]				   awlen; /*Defines the number of data transfers in a transaction (AXI4: 0=1 beat, 255=256 beats)*/
 
 	// Write Data Channel
 	logic                      	wvalid; /*Valid indicator*/ 
@@ -41,7 +42,7 @@ interface axi_interface #(
 	logic                      	arready; /*Ready indicator*/
 	logic [ID_WIDTH-1:0]       	arid; /*Transaction identifier for the write channels*/
 	logic [ADDR_WIDTH-1:0]     	araddr; /*Transaction address*/
-	logic						arlen; /*Defines the number of data transfers in a transaction*/
+	logic [7:0]					arlen; /*Defines the number of data transfers in a transaction (AXI4: 0=1 beat, 255=256 beats)*/
 
 
 	// Read Data Channel

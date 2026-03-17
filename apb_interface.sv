@@ -5,6 +5,7 @@
  * Creation date : Jul 5, 2025
  * Description   :
  *------------------------------------------------------------------------------*/
+`timescale 1ns/1ps
 
 // APB4 interfcae
 interface apb_interface();	

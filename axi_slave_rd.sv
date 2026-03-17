@@ -5,6 +5,8 @@
  * Creation date : Nov 3, 2025
  * Description   :
  *------------------------------------------------------------------------------*/
+`timescale 1ns/1ps
+
 module axi_slave_rd 
 import struct_types::*;
 

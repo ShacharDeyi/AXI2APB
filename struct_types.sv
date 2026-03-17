@@ -5,6 +5,7 @@
  * Creation date : Dec 18, 2025
  * Description   : different sturcts to use in our bridge
  *------------------------------------------------------------------------------*/
+`timescale 1ns/1ps
 
 package struct_types;
 
@@ -23,7 +24,7 @@ package struct_types;
 typedef struct packed {
 	logic [ID_WIDTH-1:0]       awid; /*Transaction identifier for the write channels*/
 	logic [ADDR_WIDTH-1:0]     awaddr; /*Transaction address*/
-	logic 					   awlen; /*Defines the number of data transfers in a transaction*/
+	logic [7:0]				   awlen; /*Defines the number of data transfers in a transaction (AXI4: 0=1 beat, 255=256 beats)*/
 } axi_wr_req;
 
 typedef struct packed {
@@ -40,7 +41,7 @@ typedef struct packed {
 typedef struct packed {
 	logic [ID_WIDTH-1:0]       	arid; /*Transaction identifier for the write channels*/
 	logic [ADDR_WIDTH-1:0]     	araddr; /*Transaction address*/
-	logic						arlen; /*Defines the number of data transfers in a transaction*/
+	logic [7:0]					arlen; /*Defines the number of data transfers in a transaction (AXI4: 0=1 beat, 255=256 beats)*/
 } axi_rd_req;
 
 typedef struct packed {

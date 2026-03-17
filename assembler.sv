@@ -6,6 +6,7 @@
  * Description   : Assembler module that combines 2 APB responses into 1 AXI 
  *                 response. Handles both read (combine data) and write (pass response)
  *------------------------------------------------------------------------------*/
+`timescale 1ns/1ps
 
 module assembler 
 import struct_types::*;

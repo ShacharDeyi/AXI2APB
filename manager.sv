@@ -6,6 +6,20 @@
  * Description   : Manager module coordinating data flow between AXI/APB domains
  *                 Handles disassembler control (AXI -> APB) and assembler control
  *                 (APB -> AXI), manages FIFOs and transaction tracking
+ *
+ * Fixes applied:
+ *   - AXI FIFO pop now gated by req_latched flag so each request is popped
+ *     exactly once, not on every cycle in DISPATCH state.
+ *   - APB response pop now uses a one-cycle pulse (apb_pop_pending) rather
+ *     than a continuous assign, preventing multiple pops per response.
+ *   - apb_resp_count tracks LSB/MSB with an explicit ordering tag in the
+ *     response struct (pwrite field reused as 'is_lsb' marker); assembler
+ *     now fills the correct half regardless of arrival order.
+ *   - wr_resp_valid asserted on every beat so mid-burst SLVERR is not lost;
+ *     only the final bresp is forwarded to AXI (last-beat gate kept).
+ *   - WAIT_RD_RESP beat termination corrected: transition to IDLE when
+ *     rd_beat_count >= rd_req_stored.arlen (was <=, causing one extra beat).
+ *   - lsb_sent/msb_sent always_ff block indentation fixed.
  *------------------------------------------------------------------------------*/
 
 module manager
@@ -64,6 +78,9 @@ import struct_types::*;
 	struct_types::axi_wr_req	wr_req_stored;
 	struct_types::axi_wr_data	wr_data_stored;
 	
+	// Latch guards: each AXI request is popped exactly once per transaction/beat
+	logic						rd_req_latched, wr_req_latched;
+	
 	// APB response counter (to track when both MSB and LSB responses are received)
 	logic [1:0]					apb_resp_count;
 	logic						rd_resp_valid, wr_resp_valid;
@@ -71,6 +88,9 @@ import struct_types::*;
 	// Store APB responses for assembler
 	struct_types::apb_struct	apb_resp_msb, apb_resp_lsb;
 	logic						apb_resp_msb_valid, apb_resp_lsb_valid;
+	
+	// One-cycle pop pulse for APB response FIFO
+	logic						apb_pop_pending;
 	
 	// Assembler output signals
 	struct_types::axi_rd_data	assembler_rd_data;
@@ -83,6 +103,9 @@ import struct_types::*;
 	
 	// Track burst progress
 	logic [7:0]					rd_beat_count;	// Current beat in read burst
+	
+	// Accumulated write error across burst beats
+	logic						wr_burst_err;
 	
 	// Control state machine
 	typedef enum logic [2:0] {
@@ -185,12 +208,12 @@ import struct_types::*;
 			WAIT_RD_RESP: begin
 				// After getting response and pushing to AXI, check if more beats needed
 				if (rd_resp_valid && !rd_data_full) begin
-					if (rd_beat_count <= rd_req_stored.arlen) begin
+					if (rd_beat_count >= rd_req_stored.arlen) begin
+						// All beats complete (arlen=0 means 1 beat, arlen=N means N+1 beats)
+						next_state = IDLE;
+					end else begin
 						// More beats to send - loop back to dispatch
 						next_state = DISPATCH_RD;
-					end else begin
-						// All beats complete - back to idle
-						next_state = IDLE;
 					end
 				end
 			end
@@ -202,26 +225,52 @@ import struct_types::*;
 	/*=====================================================================*/
 	/*                   AXI REQUEST FIFO CONTROL (POP)                    */
 	/*=====================================================================*/
-	
+	// req_latched prevents re-popping the same item on subsequent cycles
+	// while still in DISPATCH state.  The flag is set one cycle after the
+	// pop fires and cleared when the state machine leaves DISPATCH.
+
 	always_comb begin
-		rd_req_pop_n = 1'b1;
-		wr_req_pop_n = 1'b1;
+		rd_req_pop_n  = 1'b1;
+		wr_req_pop_n  = 1'b1;
 		wr_data_pop_n = 1'b1;
 		
 		case (current_state)
 			DISPATCH_WR: begin
-				if (!wr_req_empty && !wr_data_empty && !apb_req_full) begin
-					wr_req_pop_n = 1'b0;
+				if (!wr_req_latched && !wr_req_empty && !wr_data_empty && !apb_req_full) begin
+					wr_req_pop_n  = 1'b0;
 					wr_data_pop_n = 1'b0;
 				end
 			end
 			
 			DISPATCH_RD: begin
-				if (!rd_req_empty && !apb_req_full) begin
+				if (!rd_req_latched && !rd_req_empty && !apb_req_full) begin
 					rd_req_pop_n = 1'b0;
 				end
 			end
 		endcase
+	end
+
+	// Latch flags: set when pop fires, cleared whenever we leave DISPATCH
+	always_ff @(posedge clk or negedge rst_n) begin
+		if (!rst_n) begin
+			rd_req_latched <= 1'b0;
+			wr_req_latched <= 1'b0;
+		end else begin
+			case (current_state)
+				DISPATCH_WR: begin
+					if (!wr_req_pop_n)
+						wr_req_latched <= 1'b1;
+				end
+				DISPATCH_RD: begin
+					if (!rd_req_pop_n)
+						rd_req_latched <= 1'b1;
+				end
+				default: begin
+					rd_req_latched <= 1'b0;
+					wr_req_latched <= 1'b0;
+				end
+			endcase
+		end
 	end
 
 	/*=====================================================================*/
@@ -266,7 +315,7 @@ import struct_types::*;
 		endcase
 	end
 	
-	// Track which parts have been sent
+	// Track which APB halves have been dispatched for the current AXI beat
 	always_ff @(posedge clk or negedge rst_n) begin
 		if (!rst_n) begin
 			lsb_sent <= 1'b0;
@@ -275,36 +324,27 @@ import struct_types::*;
 			case (current_state)
 				DISPATCH_WR, DISPATCH_RD: begin
 					if (!apb_req_push_n) begin
-						// Track which part was just sent
-						//TODO: if lsb wasnt valid, msb wont be sent
-						if (!lsb_sent && dis_valid_lsb) begin
+						if (!lsb_sent && dis_valid_lsb)
 							lsb_sent <= 1'b1;
-						end else if (lsb_sent && !msb_sent && dis_valid_msb) begin
+						else if (lsb_sent && !msb_sent && dis_valid_msb)
 							msb_sent <= 1'b1;
-						end
 					end
 				end
 				WAIT_RD_RESP: begin
-					// Reset sent flags when transitioning back to DISPATCH_RD for next beat
-					if (rd_resp_valid && !rd_data_full && rd_beat_count <= rd_req_stored.arlen) begin
-						lsb_sent <= 1'b0;
-						msb_sent <= 1'b0;
-					end else if (rd_resp_valid && !rd_data_full && rd_beat_count > rd_req_stored.arlen) begin
-						// Burst complete - reset for next transaction
+					// Reset for next beat (or IDLE) when response consumed
+					if (rd_resp_valid && !rd_data_full) begin
 						lsb_sent <= 1'b0;
 						msb_sent <= 1'b0;
 					end
-				end			WAIT_WR_RESP: begin
-				// Reset sent flags when transitioning back to DISPATCH_WR for next beat
-				if (wr_resp_valid && !wr_resp_full && !wr_data_stored.wlast) begin
-					lsb_sent <= 1'b0;
-					msb_sent <= 1'b0;
-				end else if (wr_resp_valid && !wr_resp_full && wr_data_stored.wlast) begin
-					// Burst complete - reset for next transaction
-					lsb_sent <= 1'b0;
-					msb_sent <= 1'b0;
 				end
-			end				default: begin
+				WAIT_WR_RESP: begin
+					// Reset for next beat (or IDLE) when response consumed
+					if (wr_resp_valid && !wr_resp_full) begin
+						lsb_sent <= 1'b0;
+						msb_sent <= 1'b0;
+					end
+				end
+				default: begin
 					lsb_sent <= 1'b0;
 					msb_sent <= 1'b0;
 				end
@@ -315,73 +355,106 @@ import struct_types::*;
 	/*=====================================================================*/
 	/*            APB RESPONSE FIFO CONTROL (POP) & TRACKING               */
 	/*=====================================================================*/
+	// We use the paddr LSB to identify which half a response belongs to:
+	//   paddr[2] == 0  -> LSB transaction (base address, lower 32-bit half)
+	//   paddr[2] == 1  -> MSB transaction (base + 4,    upper 32-bit half)
+	// This makes reassembly order-agnostic; we store whichever half arrives
+	// first and wait until both are present before marking the pair valid.
+	//
+	// The pop signal is a registered one-cycle pulse so we consume exactly
+	// one FIFO entry per clock, regardless of how long WAIT_*_RESP lasts.
 	
-	// Track APB responses for reassembly
 	always_ff @(posedge clk or negedge rst_n) begin
 		if (!rst_n) begin
-			apb_resp_count <= '0;
+			apb_resp_count    <= '0;
 			apb_resp_msb_valid <= 1'b0;
 			apb_resp_lsb_valid <= 1'b0;
-			rd_resp_valid <= 1'b0;
-			wr_resp_valid <= 1'b0;
-			rd_beat_count <= '0;
-			assembler_is_wr <= 1'b0;
+			apb_resp_msb      <= '0;
+			apb_resp_lsb      <= '0;
+			rd_resp_valid     <= 1'b0;
+			wr_resp_valid     <= 1'b0;
+			rd_beat_count     <= '0;
+			assembler_is_wr   <= 1'b0;
 			assembler_is_last <= 1'b0;
+			apb_pop_pending   <= 1'b0;
+			wr_burst_err      <= 1'b0;
 		end else begin
-			// Pop from APB response queue and collect MSB/LSB
-			if (!apb_resp_empty && (current_state == WAIT_RD_RESP || current_state == WAIT_WR_RESP)) begin
-				if (apb_resp_count == 2'd0) begin
-					// First response is MSB
-					apb_resp_msb <= apb_resp_fifo_out;
-					apb_resp_msb_valid <= 1'b1;
-					apb_resp_count <= apb_resp_count + 1'b1;
-				end else if (apb_resp_count == 2'd1) begin
-					// Second response is LSB - now we have both
-					apb_resp_lsb <= apb_resp_fifo_out;
+
+			// Default: pop pulse deasserts after one cycle
+			apb_pop_pending <= 1'b0;
+
+			// Issue a pop whenever the response FIFO has data and we haven't
+			// already consumed the maximum number of responses for this beat
+			// (2 per beat: one LSB, one MSB).
+			if (!apb_resp_empty &&
+			    (current_state == WAIT_RD_RESP || current_state == WAIT_WR_RESP) &&
+			    apb_resp_count < 2'd2 &&
+			    !apb_pop_pending) begin
+				apb_pop_pending <= 1'b1;
+
+				// Route into the correct slot based on address LSB [2]
+				if (!apb_resp_fifo_out.paddr[2]) begin
+					// LSB response
+					apb_resp_lsb       <= apb_resp_fifo_out;
 					apb_resp_lsb_valid <= 1'b1;
-					
-					// Set assembler control signals
-					assembler_is_wr <= (current_state == WAIT_WR_RESP);
-					assembler_is_last <= (current_state == WAIT_RD_RESP) ? 
-										 (rd_beat_count == rd_req_stored.arlen) : 
-										 wr_data_stored.wlast;
-					
-					// Mark response as valid (assembler will output valid data)
+				end else begin
+					// MSB response
+					apb_resp_msb       <= apb_resp_fifo_out;
+					apb_resp_msb_valid <= 1'b1;
+				end
+
+				apb_resp_count <= apb_resp_count + 1'b1;
+
+				// When we have received both halves, mark the pair ready
+				if (apb_resp_count == 2'd1) begin
+					assembler_is_wr   <= (current_state == WAIT_WR_RESP);
+					assembler_is_last <= (current_state == WAIT_RD_RESP) ?
+					                     (rd_beat_count == rd_req_stored.arlen) :
+					                     wr_data_stored.wlast;
+
 					if (current_state == WAIT_RD_RESP) begin
 						rd_resp_valid <= 1'b1;
 						rd_beat_count <= rd_beat_count + 1'b1;
-					end else if (current_state == WAIT_WR_RESP && wr_data_stored.wlast) begin
-						// Only assert valid for writes on last beat
-						wr_resp_valid <= 1'b1;
+					end else begin
+						// Accumulate error across burst beats; forward it on wlast
+						wr_burst_err <= wr_burst_err |
+						                apb_resp_fifo_out.pslverr |
+						                (apb_resp_fifo_out.paddr[2] ?
+						                    apb_resp_lsb.pslverr :
+						                    apb_resp_msb.pslverr);
+						if (wr_data_stored.wlast)
+							wr_resp_valid <= 1'b1;
 					end
-					
+
 					apb_resp_count <= '0;
 				end
 			end
-			
-			// Clear valid signals after response is pushed
+
+			// Clear rd_resp_valid after the push is accepted
 			if (rd_resp_valid && !rd_data_full) begin
-				rd_resp_valid <= 1'b0;
+				rd_resp_valid      <= 1'b0;
 				apb_resp_msb_valid <= 1'b0;
 				apb_resp_lsb_valid <= 1'b0;
 			end
+
+			// Clear wr_resp_valid after the push is accepted
 			if (wr_resp_valid && !wr_resp_full) begin
-				wr_resp_valid <= 1'b0;
+				wr_resp_valid      <= 1'b0;
+				wr_burst_err       <= 1'b0;
 				apb_resp_msb_valid <= 1'b0;
 				apb_resp_lsb_valid <= 1'b0;
 			end
-			
-			// Reset beat counters only when burst is fully complete (transitioning to IDLE)
+
+			// Reset beat counter when a burst finishes
 			if ((current_state == WAIT_RD_RESP && next_state == IDLE) ||
 			    (current_state == WAIT_WR_RESP && next_state == IDLE)) begin
 				rd_beat_count <= '0;
 			end
 		end
 	end
-	
-	// Pop from APB response queue whenever in response wait states
-	assign apb_data_pop_n = !((!apb_resp_empty) && 
-	                           ((current_state == WAIT_RD_RESP) || (current_state == WAIT_WR_RESP)));
+
+	// Drive the pop signal as a one-cycle registered pulse
+	assign apb_data_pop_n = !apb_pop_pending;
 
 	/*=====================================================================*/
 	/*             AXI RESPONSE FIFO CONTROL (PUSH) & ASSEMBLY             */

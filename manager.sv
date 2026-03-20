@@ -123,7 +123,17 @@ import struct_types::*;
 	/*=====================================================================*/
 	/*                        STATE MACHINE                                */
 	/*=====================================================================*/
+	// request contained both parts of the bus or only one of them.
+	wire both = (lsb_sent || (!lsb_sent && !apb_req_push_n && dis_valid_lsb)) &&
+					( msb_sent || ( lsb_sent && !msb_sent && !apb_req_push_n && dis_valid_msb));
+	wire lsb_only = (lsb_sent || (!lsb_sent && !apb_req_push_n && dis_valid_lsb)) && !dis_valid_msb;
+	wire msb_only = (msb_sent || (!msb_sent && !apb_req_push_n && dis_valid_msb)) && !dis_valid_lsb;
 
+	wire wr_req = !wr_req_empty && !wr_data_empty;
+	wire wr_resp_received = wr_resp_valid && !wr_resp_full;
+	wire rd_resp_received = rd_resp_valid && !rd_data_full;
+	
+	
 	always_ff @(posedge clk or negedge rst_n) begin
 		if (!rst_n) current_state <= IDLE;
 		else        current_state <= next_state;
@@ -132,49 +142,16 @@ import struct_types::*;
 	always_comb begin
 		next_state = current_state;
 		case (current_state)
-			IDLE: begin
-				if (!wr_req_empty && !wr_data_empty) next_state = DISPATCH_WR;
-				else if (!rd_req_empty)              next_state = DISPATCH_RD;
-			end
-
+			IDLE: next_state = wr_req ? DISPATCH_WR : (!rd_req_empty ? DISPATCH_RD : current_state);
 			// Exit DISPATCH the cycle the last half is pushed.
 			// We compute "will lsb/msb be done after this cycle?" combinationally
 			// by peeking at apb_req_push_n (already driven this cycle in always_comb below).
 			// lsb done = already sent OR being sent right now (push fires and it's the lsb)
 			// msb done = already sent OR being sent right now (push fires and it's the msb)
-			DISPATCH_WR: begin
-				if (( lsb_sent || (!lsb_sent && !apb_req_push_n &&  dis_valid_lsb)) &&
-					( msb_sent || ( lsb_sent && !msb_sent && !apb_req_push_n && dis_valid_msb)) )
-					next_state = WAIT_WR_RESP;
-				else if ((lsb_sent || (!lsb_sent && !apb_req_push_n && dis_valid_lsb)) && !dis_valid_msb)
-					next_state = WAIT_WR_RESP;
-				else if (!dis_valid_lsb && !dis_valid_msb)
-					next_state = WAIT_WR_RESP;
-			end
-
-			DISPATCH_RD: begin
-				if (( lsb_sent || (!lsb_sent && !apb_req_push_n &&  dis_valid_lsb)) &&
-					( msb_sent || ( lsb_sent && !msb_sent && !apb_req_push_n && dis_valid_msb)) )
-					next_state = WAIT_RD_RESP;
-				else if ((lsb_sent || (!lsb_sent && !apb_req_push_n && dis_valid_lsb)) && !dis_valid_msb)
-					next_state = WAIT_RD_RESP;
-				else if (!dis_valid_lsb && !dis_valid_msb)
-					next_state = WAIT_RD_RESP;
-			end
-
-			WAIT_WR_RESP: begin
-				if (wr_resp_valid && !wr_resp_full) begin
-					if (wr_data_stored.wlast) next_state = IDLE;
-					else                      next_state = DISPATCH_WR;
-				end
-			end
-
-			WAIT_RD_RESP: begin
-				if (rd_resp_valid && !rd_data_full) begin
-					if (rd_beat_count >= rd_req_stored.arlen) next_state = IDLE;
-					else                                      next_state = DISPATCH_RD;
-				end
-			end
+			DISPATCH_WR: next_state = (both || lsb_only || msb_only) ? WAIT_WR_RESP : current_state;
+			DISPATCH_RD: next_state = (both || lsb_only || msb_only) ? WAIT_RD_RESP : current_state;
+			WAIT_WR_RESP: next_state = wr_resp_received ? (wr_data_stored.wlast ? IDLE : DISPATCH_WR) : current_state;
+			WAIT_RD_RESP: next_state = rd_resp_received ? ((rd_beat_count >= rd_req_stored.arlen) ? IDLE : DISPATCH_RD) : current_state;
 
 			default: next_state = IDLE;
 		endcase
@@ -184,7 +161,7 @@ import struct_types::*;
 	/*                   AXI REQUEST FIFO CONTROL (POP)                    */
 	/*=====================================================================*/
 	// Pop fires on the first cycle of DISPATCH (before wr_req_latched goes high).
-	// apb_req_full does NOT block the pop  we are just latching the request
+	// apb_req_full does NOT block the pop  we are just latching the request
 	// into wr_req_stored/wr_data_stored. The push to APB is gated separately.
 
 	always_comb begin
@@ -239,7 +216,7 @@ import struct_types::*;
 					if (!lsb_sent && dis_valid_lsb) begin
 						apb_req_push_n  = 1'b0;
 						apb_req_fifo_in = dis_apb_lsb;
-					end else if (lsb_sent && !msb_sent && dis_valid_msb) begin
+					end else if ((lsb_sent || !dis_valid_lsb) && !msb_sent && dis_valid_msb) begin
 						apb_req_push_n  = 1'b0;
 						apb_req_fifo_in = dis_apb_msb;
 					end
@@ -252,7 +229,7 @@ import struct_types::*;
 					if (!lsb_sent && dis_valid_lsb) begin
 						apb_req_push_n  = 1'b0;
 						apb_req_fifo_in = dis_apb_lsb;
-					end else if (lsb_sent && !msb_sent && dis_valid_msb) begin
+					end else if ((lsb_sent || !dis_valid_lsb) && !msb_sent && dis_valid_msb) begin
 						apb_req_push_n  = 1'b0;
 						apb_req_fifo_in = dis_apb_msb;
 					end

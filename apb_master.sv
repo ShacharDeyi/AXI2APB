@@ -5,11 +5,6 @@
  * Project       : RTL
  * Author        : epsdso
  * Creation date : Nov 3, 2025
- *
- * Timing fix: psel/penable must remain asserted on the cycle pready arrives
- * so that in_access && pready are simultaneously true for the response push
- * and the busy/psel/penable clear. They are now cleared the cycle AFTER
- * pready is seen, using a registered 'completing' pulse.
  *------------------------------------------------------------------------------*/
 
 module apb_master
@@ -34,29 +29,20 @@ import struct_types::*;
 	wire in_setup  =  apb.psel && !apb.penable;
 	wire in_access =  apb.psel &&  apb.penable;
 
-	// handshake: pready seen while in ACCESS  this is the completion event.
-	// psel/penable stay asserted this cycle so in_access is still true,
-	// ensuring resp_fifo_push_n fires correctly.
+	// handshake: pready seen while in ACCESS
 	wire completing = in_access && apb.pready;
 
 	// Pop FIFO exactly once per transaction
 	assign req_fifo_pop_n = !can_start;
 
-	// Push response on the cycle pready arrives (psel/penable still high)
+	// Push response on the cycle pready arrives (psel/penable still high this cycle,
+	// they only drop on the next edge via the always_ff below)
 	assign resp_fifo_push_n = !(completing && !resp_fifo_full);
 
-	// busy: set when we start, clear the cycle AFTER completing
-	// (one extra register stage so psel/penable don't drop until next cycle)
-	logic completing_r;
 	always_ff @(posedge clk or negedge rst_n) begin
-		if (!rst_n) completing_r <= 1'b0;
-		else        completing_r <= completing;
-	end
-
-	always_ff @(posedge clk or negedge rst_n) begin
-		if (!rst_n)        busy <= 1'b0;
-		else if (can_start) busy <= 1'b1;
-		else if (completing_r) busy <= 1'b0;
+		if (!rst_n)         busy <= 1'b0;
+		else if (can_start)  busy <= 1'b1;
+		else if (completing) busy <= 1'b0;
 	end
 
 	// Latch request when popping
@@ -65,18 +51,18 @@ import struct_types::*;
 		else if (can_start) req_lat <= req_fifo_data_out;
 	end
 
-	// psel: set on can_start, clear cycle after completing
+	// psel/penable drop the cycle AFTER completing because <= takes effect
+	// on the next clock edge  completing_r is not needed
 	always_ff @(posedge clk or negedge rst_n) begin
-		if (!rst_n)            apb.psel <= 1'b0;
-		else if (can_start)    apb.psel <= 1'b1;
-		else if (completing_r) apb.psel <= 1'b0;
+		if (!rst_n)          apb.psel <= 1'b0;
+		else if (can_start)  apb.psel <= 1'b1;
+		else if (completing) apb.psel <= 1'b0;
 	end
 
-	// penable: set when in SETUP, clear cycle after completing
 	always_ff @(posedge clk or negedge rst_n) begin
-		if (!rst_n)            apb.penable <= 1'b0;
-		else if (in_setup)     apb.penable <= 1'b1;
-		else if (completing_r) apb.penable <= 1'b0;
+		if (!rst_n)          apb.penable <= 1'b0;
+		else if (in_setup)   apb.penable <= 1'b1;
+		else if (completing) apb.penable <= 1'b0;
 	end
 
 	// APB request bus driven from latched request

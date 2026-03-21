@@ -12,7 +12,7 @@ interface apb_interface();
 //APB interface
 	parameter PADDR_WIDTH = 32;
 	parameter PDATA_WIDTH = 32; //should be 32, might need 64 for compatibility while testing
-	parameter PSTRB_WIDTH = 4; 
+	parameter PSTRB_WIDTH = PDATA_WIDTH/8; 
 	
 	
 	logic [PADDR_WIDTH-1:0] 	paddr; 		/*TRANSACTION ADDRESS*/

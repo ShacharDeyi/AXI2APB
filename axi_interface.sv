@@ -12,7 +12,9 @@ interface axi_interface #(
 	parameter DATA_WIDTH    = 64,
 	parameter ID_WIDTH      = 32,
 	parameter RRESP_WIDTH   = 2,
-	parameter BRESP_WIDTH   = 2
+	parameter BRESP_WIDTH   = 2,
+	parameter MAX_SIZE		= 3,
+	parameter MAX_LEN		= 8
 );
 
 	// Write Request Channel
@@ -21,6 +23,7 @@ interface axi_interface #(
 	logic [ID_WIDTH-1:0]       awid; /*Transaction identifier for the write channels*/
 	logic [ADDR_WIDTH-1:0]     awaddr; /*Transaction address*/
 	logic [7:0]				   awlen; /*Defines the number of data transfers in a transaction (AXI4: 0=1 beat, 255=256 beats)*/
+	logic [MAX_SIZE-1:0]       awsize; /*Size indicates the maximum number of bytes in each data transfer, 8bytes = 011, 64byes = 110*/
 
 	// Write Data Channel
 	logic                      	wvalid; /*Valid indicator*/ 
@@ -42,8 +45,8 @@ interface axi_interface #(
 	logic                      	arready; /*Ready indicator*/
 	logic [ID_WIDTH-1:0]       	arid; /*Transaction identifier for the write channels*/
 	logic [ADDR_WIDTH-1:0]     	araddr; /*Transaction address*/
-	logic [7:0]					arlen; /*Defines the number of data transfers in a transaction (AXI4: 0=1 beat, 255=256 beats)*/
-
+	logic [MAX_LEN-1:0]			arlen; /*Defines the number of data transfers in a transaction (AXI4: 0=1 beat, 255=256 beats)*/
+	logic [MAX_SIZE-1:0]		arsize;/*Size indicates the maximum number of bytes in each data transfer, 8bytes = 011, 64byes = 110*/
 
 	// Read Data Channel
 	logic                      rvalid;
@@ -62,6 +65,7 @@ interface axi_interface #(
 		output awaddr,
 		output awid,
 		output awlen,
+		output awsize,
 		input  awready,
 
 		output wvalid,
@@ -79,6 +83,7 @@ interface axi_interface #(
 		output araddr,
 		output arid,
 		output arlen,
+		output arsize,
 		input  arready,
 
 		input  rvalid,
@@ -95,6 +100,7 @@ interface axi_interface #(
 		input  awaddr,
 		input  awid,
 		input  awlen,
+		input  awsize,
 		output awready,
 
 		input  wvalid,
@@ -112,6 +118,7 @@ interface axi_interface #(
 		input  araddr,
 		input  arid,
 		input  arlen,
+		input  arsize,
 		output arready,
 
 		output rvalid,

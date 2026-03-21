@@ -3,62 +3,107 @@
  * Project       : RTL
  * Author        : epsdso
  * Creation date : Dec 18, 2025
- * Description   : different sturcts to use in our bridge
+ * Description   : Shared types and parameters for the AXI-to-APB bridge.
  *------------------------------------------------------------------------------*/
 `timescale 1ns/1ps
 
 package struct_types;
 
-	parameter ADDR_WIDTH    = 32; //bit
-	parameter DATA_WIDTH    = 64;
-	parameter ID_WIDTH      = 32;
-	parameter RRESP_WIDTH   = 2;
-	parameter BRESP_WIDTH   = 2;
-	parameter OFFSET_APB	= 32;
-	parameter WSTRB_WIDTH 	= 8;
-	
-	parameter PADDR_WIDTH = 32;
-	parameter PDATA_WIDTH = 32; //should be 32, might need 64 for compatibility while testing
-	parameter PSTRB_WIDTH = 4; 
-			
-typedef struct packed {
-	logic [ID_WIDTH-1:0]       awid; /*Transaction identifier for the write channels*/
-	logic [ADDR_WIDTH-1:0]     awaddr; /*Transaction address*/
-	logic [7:0]				   awlen; /*Defines the number of data transfers in a transaction (AXI4: 0=1 beat, 255=256 beats)*/
-} axi_wr_req;
+    /*=========================================================================*/
+    /*  AXI parameters                                                         */
+    /*=========================================================================*/
+    parameter ADDR_WIDTH  = 32;     // AXI address width (bits)
+    parameter DATA_WIDTH  = 64;     // AXI data width (bits) -- twice APB width
+    parameter ID_WIDTH    = 32;     // AXI transaction ID width (bits)
+    parameter RRESP_WIDTH = 2;      // AXI read response code width
+    parameter BRESP_WIDTH = 2;      // AXI write response code width
+    parameter WSTRB_WIDTH = 8;      // AXI write strobe width (DATA_WIDTH/8)
+    parameter MAX_SIZE    = 3;      // AXI size field width (encodes 1-8 bytes)
+    parameter MAX_LEN     = 8;      // AXI len field width (encodes burst length)
 
-typedef struct packed {
-	logic [DATA_WIDTH-1:0]     	wdata; /*DATA_WIDTH*/
-	logic [WSTRB_WIDTH-1:0]		wstrb; /*PSTRB indicates which byte lanes to update during a write transfer*/
-	logic                      	wlast; /*Last write data*/
-} axi_wr_data;
+    /*=========================================================================*/
+    /*  APB parameters                                                         */
+    /*=========================================================================*/
+    parameter PADDR_WIDTH = 32;     // APB address width (bits)
+    parameter PDATA_WIDTH = 32;     // APB data width (bits) -- half AXI width
+    parameter PSTRB_WIDTH = 4;      // APB strobe width (PDATA_WIDTH/8)
 
-typedef struct packed {
-	logic [ID_WIDTH-1:0]       	bid; /*Transaction identifier for the write channels*/
-	logic [BRESP_WIDTH-1:0]    	bresp; /*Write response*/
-} axi_wr_resp;
+    /*=========================================================================*/
+    /*  AXI write channel structs                                              */
+    /*=========================================================================*/
 
-typedef struct packed {
-	logic [ID_WIDTH-1:0]       	arid; /*Transaction identifier for the write channels*/
-	logic [ADDR_WIDTH-1:0]     	araddr; /*Transaction address*/
-	logic [7:0]					arlen; /*Defines the number of data transfers in a transaction (AXI4: 0=1 beat, 255=256 beats)*/
-} axi_rd_req;
+    // AW channel: write address / burst descriptor (one per burst)
+    typedef struct packed {
+        logic [ID_WIDTH-1:0]    awid;   // transaction ID
+        logic [ADDR_WIDTH-1:0]  awaddr; // burst base address
+        logic [MAX_LEN-1:0]     awlen;  // number of beats minus 1
+        logic [MAX_SIZE-1:0]    awsize; // bytes per beat (encoded as log2)
+    } axi_wr_req;
 
-typedef struct packed {
-	logic [ID_WIDTH-1:0]       rid;
-	logic [DATA_WIDTH-1:0]     rdata;
-	logic [RRESP_WIDTH-1:0]    rresp;
-	logic                      rlast;
-} axi_rd_data;
+    // W channel: write data (one entry per beat)
+    typedef struct packed {
+        logic [DATA_WIDTH-1:0]  wdata;  // 64-bit write data
+        logic [WSTRB_WIDTH-1:0] wstrb;  // 8-bit byte enables
+        logic                   wlast;  // last beat of burst
+    } axi_wr_data;
 
-typedef struct packed {
-	logic [PADDR_WIDTH-1:0] 	paddr; 		/*TRANSACTION ADDRESS*/
-	logic 						pwrite; 	/*PWRITE INDICATES AN APB WRITE ACCESS WHEN HIGH AND AN APB READ ACCESS WHEN LOW.*/
-	logic [PDATA_WIDTH-1:0] 	pwdata; 	/*The PWDATA write data bus is driven by the APB bridge Requester during write cycles when PWRITE is HIGH. */
-	logic [PSTRB_WIDTH-1:0] 	pstrb;		/*PSTRB indicates which byte lanes to update during a write transfer*/
-	logic 						pready;
-	logic [PDATA_WIDTH-1:0] 	prdata; 	/*The PRDATA read data bus is driven by the selected Completer during read cycles when PWRITE is LOW.*/
-	logic 						pslverr; 	/*PSLVERR is an optional signal that can be asserted HIGH by the Completer to indicate an error condition on an APB transfer.*/ 
-} apb_struct;
+    // B (write response) channel: write response (one per burst, sent after wlast)
+    typedef struct packed {
+        logic [ID_WIDTH-1:0]    bid;    // echoes awid
+        logic [BRESP_WIDTH-1:0] bresp;  // OKAY=2'b00, SLVERR=2'b10
+    } axi_wr_resp;
+
+    /*=========================================================================*/
+    /*  AXI read channel structs                                               */
+    /*=========================================================================*/
+
+    // AR channel: read address / burst descriptor (one per burst)
+    typedef struct packed {
+        logic [ID_WIDTH-1:0]    arid;   // transaction ID
+        logic [ADDR_WIDTH-1:0]  araddr; // burst base address
+        logic [MAX_LEN-1:0]     arlen;  // number of beats minus 1
+        logic [MAX_SIZE-1:0]    arsize; // bytes per beat (encoded as log2)
+    } axi_rd_req;
+
+    // R channel: read data (one entry per beat)
+    typedef struct packed {
+        logic [ID_WIDTH-1:0]    rid;    // echoes arid
+        logic [DATA_WIDTH-1:0]  rdata;  // 64-bit read data
+        logic [RRESP_WIDTH-1:0] rresp;  // OKAY=2'b00, SLVERR=2'b10
+        logic                   rlast;  // last beat of burst
+    } axi_rd_data;
+
+    /*=========================================================================*/
+    /*  APB struct                                                             */
+    /*=========================================================================*/
+    // Carries all APB signals through the request and response FIFOs.
+    // Response fields (pready, prdata, pslverr) are zeroed on the request
+    // path and filled in by apb_master when the slave responds.
+
+    typedef struct packed {
+        logic [PADDR_WIDTH-1:0] paddr;   // transaction address
+        logic                   pwrite;  // 1=write, 0=read
+        logic [PDATA_WIDTH-1:0] pwdata;  // write data (valid when pwrite=1)
+        logic [PSTRB_WIDTH-1:0] pstrb;   // byte enables (valid when pwrite=1)
+        logic                   pready;  // slave ready (response field)
+        logic [PDATA_WIDTH-1:0] prdata;  // read data (response field)
+        logic                   pslverr; // slave error (response field)
+    } apb_struct;
+
+    /*=========================================================================*/
+    /*  Sideband tag struct                                                    */
+    /*=========================================================================*/
+    // One entry pushed into the sideband FIFO for every APB request pushed.
+    // Popped when the APB response arrives to route it to the correct
+    // transaction slot and half (LSB or MSB) in the manager.
+    //
+    // This keeps apb_struct clean -- no transaction metadata leaks into
+    // the APB pipeline -- and exploits the fact that APB is strictly
+    // ordered (responses arrive in the same order as requests).
+
+    typedef struct packed {
+        logic slot;   // which manager transaction slot (0 or 1)
+        logic is_msb; // which 32-bit half: 0=LSB (addr+0), 1=MSB (addr+4)
+    } apb_tag_t;
 
 endpackage

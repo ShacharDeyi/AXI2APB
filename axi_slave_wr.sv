@@ -35,6 +35,7 @@ import struct_types::*;
 		req_fifo_data_out.awid    = axi.awid;
 		req_fifo_data_out.awaddr  = axi.awaddr;
 		req_fifo_data_out.awlen   = axi.awlen;
+		req_fifo_data_out.awsize  = axi.awsize;
 	end
 
 	// We push only when Valid and Ready handshake occurs
@@ -45,9 +46,9 @@ import struct_types::*;
 
 	// Prepare the packet
 	always_comb begin
-		data_fifo_data_out.wdata    = axi.wdata;
+		data_fifo_data_out.wdata  = axi.wdata;
 		data_fifo_data_out.wstrb  = axi.wstrb;
-		data_fifo_data_out.wlast   = axi.wlast;
+		data_fifo_data_out.wlast  = axi.wlast;
 	end
 
 	// We push only when Valid and Ready handshake occurs

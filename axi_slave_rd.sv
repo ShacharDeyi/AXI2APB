@@ -32,6 +32,7 @@ import struct_types::*;
 		req_fifo_data_out.arid    = axi.arid;
 		req_fifo_data_out.araddr  = axi.araddr;
 		req_fifo_data_out.arlen   = axi.arlen;
+		req_fifo_data_out.arsize  = axi.arsize;
 	end
 
 	// We push only when Valid and Ready handshake occurs

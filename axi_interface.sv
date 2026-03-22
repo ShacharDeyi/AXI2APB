@@ -22,7 +22,7 @@ interface axi_interface #(
 	logic                      awready; /*Ready indicator*/
 	logic [ID_WIDTH-1:0]       awid; /*Transaction identifier for the write channels*/
 	logic [ADDR_WIDTH-1:0]     awaddr; /*Transaction address*/
-	logic [7:0]				   awlen; /*Defines the number of data transfers in a transaction (AXI4: 0=1 beat, 255=256 beats)*/
+	logic [MAX_LEN-1:0]				   awlen; /*Defines the number of data transfers in a transaction (AXI4: 0=1 beat, 255=256 beats)*/
 	logic [MAX_SIZE-1:0]       awsize; /*Size indicates the maximum number of bytes in each data transfer, 8bytes = 011, 64byes = 110*/
 
 	// Write Data Channel

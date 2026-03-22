@@ -93,7 +93,7 @@ import struct_types::*;
 
     DW_fifo_s1_sf #(
         .width ($bits(axi_wr_req)),
-        .depth (16)
+        .depth (FIFO_DEPTH)
     ) axi_wr_req_queue (
         .clk        (clk),
         .rst_n      (rst_n),
@@ -107,7 +107,7 @@ import struct_types::*;
 
     DW_fifo_s1_sf #(
         .width ($bits(axi_wr_data)),
-        .depth (16)
+        .depth (FIFO_DEPTH)
     ) axi_wr_data_queue (
         .clk        (clk),
         .rst_n      (rst_n),
@@ -121,7 +121,7 @@ import struct_types::*;
 
     DW_fifo_s1_sf #(
         .width ($bits(axi_wr_resp)),
-        .depth (16)
+        .depth (FIFO_DEPTH)
     ) axi_wr_resp_queue (
         .clk        (clk),
         .rst_n      (rst_n),
@@ -155,7 +155,7 @@ import struct_types::*;
 
     DW_fifo_s1_sf #(
         .width ($bits(axi_rd_req)),
-        .depth (16)
+        .depth (FIFO_DEPTH)
     ) axi_rd_req_queue (
         .clk        (clk),
         .rst_n      (rst_n),
@@ -169,7 +169,7 @@ import struct_types::*;
 
     DW_fifo_s1_sf #(
         .width ($bits(axi_rd_data)),
-        .depth (16)
+        .depth (FIFO_DEPTH)
     ) axi_rd_data_queue (
         .clk        (clk),
         .rst_n      (rst_n),
@@ -191,7 +191,7 @@ import struct_types::*;
 
     DW_fifo_s1_sf #(
         .width ($bits(apb_struct)),
-        .depth (16)
+        .depth (FIFO_DEPTH)
     ) apb_req_queue (
         .clk        (clk),
         .rst_n      (rst_n),
@@ -205,7 +205,7 @@ import struct_types::*;
 
     DW_fifo_s1_sf #(
         .width ($bits(apb_tag_t)),      // 2 bits: {slot, is_msb}
-        .depth (16)                     // must match apb_req_queue depth
+        .depth (FIFO_DEPTH)                     // must match apb_req_queue depth
     ) apb_tag_queue (
         .clk        (clk),
         .rst_n      (rst_n),
@@ -235,7 +235,7 @@ import struct_types::*;
 
     DW_fifo_s1_sf #(
         .width ($bits(apb_struct)),
-        .depth (16)
+        .depth (FIFO_DEPTH)
     ) apb_resp_queue (
         .clk        (clk),
         .rst_n      (rst_n),

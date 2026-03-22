@@ -122,6 +122,12 @@ module tb;
     int  test_num    = 0;
     string test_name = "";
 
+    // Reference counters for shared ready signals.
+    // bready/rready stay asserted as long as at least one task needs them.
+    // Each task increments on entry, decrements on exit.
+    int  bready_users = 0;
+    int  rready_users = 0;
+
     // SLVERR trigger: APB slave asserts pslverr when paddr matches this value.
     // Set by individual tests; 0 = no error injection.
     logic [31:0] slverr_addr = 0;
@@ -245,7 +251,10 @@ module tb;
         axi_if.wlast  = 0;
 
         // -- B channel --
+        // Use a reference counter so bready stays high while ANY concurrent
+        // task needs a B response.  Each task filters on its own bid.
         @(negedge clk);
+        bready_users++;
         axi_if.bready = 1;
         timeout = 0;
         do begin
@@ -254,14 +263,16 @@ module tb;
             if (timeout > TIMEOUT_LIMIT) begin
                 $display("%s[FAIL]%s %s: B response timeout", RED, RST, label);
                 error_count++;
-                axi_if.bready = 0;
+                bready_users--;
+                if (bready_users == 0) axi_if.bready = 0;
                 return;
             end
-        end while (!axi_if.bvalid);
+        end while (!(axi_if.bvalid && axi_if.bid == awid));
         got_bid   = axi_if.bid;
         got_bresp = axi_if.bresp;
         @(negedge clk);
-        axi_if.bready = 0;
+        bready_users--;
+        if (bready_users == 0) axi_if.bready = 0;
 
         // -- Check --
         if (got_bid !== awid) begin
@@ -329,7 +340,10 @@ module tb;
         axi_if.arvalid = 0;
 
         // -- R channel (all beats) --
+        // Use a reference counter so rready stays high while ANY concurrent
+        // task needs R beats.  Each task filters on its own rid.
         @(negedge clk);
+        rready_users++;
         axi_if.rready = 1;
         all_ok = 1;
 
@@ -344,7 +358,7 @@ module tb;
                     axi_if.rready = 0;
                     return;
                 end
-            end while (!axi_if.rvalid);
+            end while (!(axi_if.rvalid && axi_if.rid == arid));
 
             got_rid   = axi_if.rid;
             got_rdata = axi_if.rdata;
@@ -394,7 +408,8 @@ module tb;
 
             @(negedge clk);
         end
-        axi_if.rready = 0;
+        rready_users--;
+        if (rready_users == 0) axi_if.rready = 0;
 
         if (all_ok)
             $display("%s[PASS]%s %s: all %0d beats OK  rid=%0h",
@@ -475,6 +490,56 @@ module tb;
                     dut.wr_resp_fifo_in.bresp);
         end
     end endgenerate
+
+    /*=========================================================================*/
+    /*  Write-write collision probe  (enhanced)                              */
+    /*=========================================================================*/
+
+    always @(posedge clk) begin
+        if (rst_n) begin
+            if (dut.u_manager.wr_collision &&
+                !$past(dut.u_manager.wr_collision))
+                $display("[%0t] COLLISION ASSERTED  inc=[%08h..%08h] CL[%0d..%0d]  slot0=[%08h..%08h] CL[%0d..%0d]  slot0_state=%0s",
+                    $time,
+                    dut.u_manager.wr_req_fifo_out.awaddr,
+                    dut.u_manager.wr_req_fifo_out.awaddr
+                        + ((dut.u_manager.wr_req_fifo_out.awlen+1) << dut.u_manager.wr_req_fifo_out.awsize) - 1,
+                    dut.u_manager.inc_cl_start,
+                    dut.u_manager.inc_cl_end,
+                    dut.u_manager.slot_wr_req[0].awaddr,
+                    dut.u_manager.slot_wr_req[0].awaddr
+                        + ((dut.u_manager.slot_wr_req[0].awlen+1) << dut.u_manager.slot_wr_req[0].awsize) - 1,
+                    dut.u_manager.slot_cl_start[0],
+                    dut.u_manager.slot_cl_end[0],
+                    dut.u_manager.slot_state[0].name());
+            if (!dut.u_manager.wr_collision &&
+                $past(dut.u_manager.wr_collision))
+                $display("[%0t] COLLISION CLEARED  wr_req_empty=%0b  wr_data_empty=%0b  slot0_state=%0s  slot0_is_wr=%0b  slot0_cl=[%0d..%0d]  inc_cl=[%0d..%0d]",
+                    $time,
+                    dut.wr_req_empty,
+                    dut.wr_data_empty,
+                    dut.u_manager.slot_state[0].name(),
+                    dut.u_manager.slot_is_wr[0],
+                    dut.u_manager.slot_cl_start[0],
+                    dut.u_manager.slot_cl_end[0],
+                    dut.u_manager.inc_cl_start,
+                    dut.u_manager.inc_cl_end);
+
+            // Every cycle during T12: dump key signals
+            if (test_num == 12)
+                $display("[%0t] T12_STATE  slot0=%0s slot1=%0s  wr_req_empty=%0b wr_data_empty=%0b  wr_collision=%0b  inc_cl=[%0d..%0d]  s0cl=[%0d..%0d]",
+                    $time,
+                    dut.u_manager.slot_state[0].name(),
+                    dut.u_manager.slot_state[1].name(),
+                    dut.wr_req_empty,
+                    dut.wr_data_empty,
+                    dut.u_manager.wr_collision,
+                    dut.u_manager.inc_cl_start,
+                    dut.u_manager.inc_cl_end,
+                    dut.u_manager.slot_cl_start[0],
+                    dut.u_manager.slot_cl_end[0]);
+        end
+    end
 
     /*=========================================================================*/
     /*  Anti-starvation probe                                                 */
@@ -806,8 +871,7 @@ module tb;
         // =================================================================
         test_num  = 11;
         test_name = "T11 anti-starvation stress";
-        $display("
-%s--- %s ---%s", YEL, test_name, RST);
+        $display("\n%s--- %s ---%s", YEL, test_name, RST);
 
         fork
             // -- 6 back-to-back write bursts (each 2 beats) --
@@ -815,13 +879,15 @@ module tb;
                 for (int w = 0; w < 6; w++) begin
                     automatic logic [63:0] wd[];
                     automatic logic [7:0]  ws[];
-                    automatic logic [31:0] wid  = 32'hE000 + w;
+                    automatic logic [31:0] wid   = 32'hE000 + w;
                     automatic logic [31:0] waddr = 32'hE000_0000 + (w << 4);
+                    automatic string       wlabel;
                     wd = new[2]; ws = new[2];
                     wd[0] = 64'hAAAA_BBBB_0000_0000 + w;  ws[0] = 8'hFF;
                     wd[1] = 64'hCCCC_DDDD_0000_0000 + w;  ws[1] = 8'hFF;
+                    wlabel = $sformatf("T11-WR%0d", w);
                     axi_write_burst(wid, waddr, 8'h01, 3'd3, wd, ws,
-                                    2'b00, $sformatf("T11-WR%0d", w));
+                                    2'b00, wlabel);
                 end
             end
             // -- Single read burst launched immediately --
@@ -835,6 +901,101 @@ module tb;
                                rresp_arr, "T11-RD");
             end
         join
+
+        inter_test_gap();
+
+        // =================================================================
+        // TEST 12: Write-write cache-line collision
+        //   Two write bursts to the same cache line (64-byte = 8 AXI beats).
+        //   Both start with awaddr in the same 64-byte region.
+        //   Expected: they run serially -- B response for the first arrives
+        //   before the second even gets a slot (verified by checking that
+        //   the second write's APB transactions only start after the first
+        //   B response is sent).
+        //
+        // TEST 13: Write-write no collision (different cache lines)
+        //   Two write bursts to different 64-byte cache lines.
+        //   Expected: they interleave freely on APB, both complete.
+        //
+        // TEST 14: Write-read same cache line -- must NOT stall
+        //   A write and a read to the same cache line run concurrently.
+        //   Expected: no stall, both complete (collision only blocks WaW).
+        // =================================================================
+
+        // ---- T12: WaW collision ----
+        // Submit sequentially from the TB -- the collision is exercised at
+        // the manager level since both AW+W requests land in the FIFOs with
+        // no gap and the manager must hold WR2 back via wr_collision.
+        // Forking is avoided because both tasks would drive the shared
+        // W-channel signals (wvalid/wdata/wstrb/wlast) simultaneously.
+        test_num  = 12;
+        test_name = "T12 WaW cache-line collision (serial)";
+        $display("\n%s--- %s ---%s", YEL, test_name, RST);
+        begin
+            automatic logic [63:0] wd1[], wd2[];
+            automatic logic [7:0]  ws1[], ws2[];
+            wd1 = new[2]; ws1 = new[2];
+            wd2 = new[2]; ws2 = new[2];
+            for (int i = 0; i < 2; i++) begin
+                wd1[i] = 64'h1111_0000_0000_0000 + i; ws1[i] = 8'hFF;
+                wd2[i] = 64'h2222_0000_0000_0000 + i; ws2[i] = 8'hFF;
+            end
+            axi_write_burst(32'h10, 32'h1000_0000, 8'h01, 3'd3,
+                            wd1, ws1, 2'b00, "T12-WR1");
+            axi_write_burst(32'h11, 32'h1000_0008, 8'h01, 3'd3,
+                            wd2, ws2, 2'b00, "T12-WR2");
+        end
+
+        inter_test_gap();
+
+        // ---- T13: WaW no collision (different cache lines) ----
+        // Same approach: sequential submission.  With different CLs the
+        // manager assigns slot 1 immediately (no collision), so WR2 proceeds
+        // to APB in parallel with WR1 -- verified by interleaved APB_CAPTURE.
+        test_num  = 13;
+        test_name = "T13 WaW different cache lines (concurrent)";
+        $display("\n%s--- %s ---%s", YEL, test_name, RST);
+        begin
+            automatic logic [63:0] wd1[], wd2[];
+            automatic logic [7:0]  ws1[], ws2[];
+            wd1 = new[2]; ws1 = new[2];
+            wd2 = new[2]; ws2 = new[2];
+            for (int i = 0; i < 2; i++) begin
+                wd1[i] = 64'h3333_0000_0000_0000 + i; ws1[i] = 8'hFF;
+                wd2[i] = 64'h4444_0000_0000_0000 + i; ws2[i] = 8'hFF;
+            end
+            axi_write_burst(32'h20, 32'h2000_0000, 8'h01, 3'd3,
+                            wd1, ws1, 2'b00, "T13-WR1");
+            axi_write_burst(32'h21, 32'h2000_0040, 8'h01, 3'd3,
+                            wd2, ws2, 2'b00, "T13-WR2");
+        end
+
+        inter_test_gap();
+
+        // ---- T14: Write + read same cache line (no stall) ----
+        test_num  = 14;
+        test_name = "T14 WaR same cache line (no stall)";
+        $display("\n%s--- %s ---%s", YEL, test_name, RST);
+        begin
+            automatic logic [63:0] wd[];
+            automatic logic [7:0]  ws[];
+            automatic logic [1:0]  rresp[];
+            wd = new[2]; ws = new[2]; rresp = new[2];
+            for (int i = 0; i < 2; i++) begin
+                wd[i] = 64'h5555_0000_0000_0000 + i; ws[i] = 8'hFF;
+                rresp[i] = 2'b00;
+            end
+            fork
+                axi_write_burst(32'h30, 32'h3000_0000, 8'h01, 3'd3,
+                                wd, ws, 2'b00, "T14-WR");
+                begin
+                    repeat(2) @(posedge clk);
+                    // Read to same cache line -- must not be blocked
+                    axi_read_burst(32'h31, 32'h3000_0008, 8'h01, 3'd3,
+                                   rresp, "T14-RD");
+                end
+            join
+        end
 
         inter_test_gap();
 

@@ -9,35 +9,6 @@
  * CHANGES vs. PREVIOUS REVISION
  * ============================================================================
  *
- * 5. WAR / RAW COLLISION DETECTION (cache-line granularity)
- *    Previously only Write-after-Write (WaW) pairs on the same cache line
- *    were serialised.  Read-write and write-read pairs were always allowed
- *    to proceed concurrently.
- *
- *    This revision adds two new hazard classes:
- *      RaW (Read-after-Write): an incoming WRITE is held in SLOT_IDLE while
- *        any in-flight slot is a READ whose address range overlaps the same
- *        cache line(s) as the incoming write.
- *      WaR (Write-after-Read): an incoming READ is held in SLOT_IDLE while
- *        any in-flight slot is a WRITE whose address range overlaps the same
- *        cache line(s) as the incoming read.
- *
- *    Implementation:
- *      - inc_rd_cl_start/end: cache-line range for the incoming read (FIFO head).
- *        Mirrors the existing inc_cl_start/end for writes.
- *      - slot_rd_cl_start/end: cache-line range for each slot's LATCHED read
- *        request.  Derived from slot_rd_req[gc].araddr/arlen/arsize.
- *      - slot_raw_collision[gc]: incoming write overlaps in-flight read in slot gc.
- *      - slot_war_collision[gc]: incoming read overlaps in-flight write in slot gc.
- *      - raw_collision / war_collision: OR of per-slot flags.
- *      - Write-accept condition in SLOT_IDLE now also gated by raw_collision.
- *      - Read-accept condition in SLOT_IDLE now also gated by war_collision.
- *      - s0_takes_wr / s0_takes_rd propagate the new gates consistently.
- *      - gen_pop_wants updated to reflect the new gates.
- *      - wr_accepted_this_cycle updated to include raw_collision guard.
- *      - rd_accepted_this_cycle updated to include war_collision guard.
- *    No new sequential state is added; all logic is purely combinational.
- *
  * 1. DUAL DISASSEMBLERS
  *    Previously one shared disassembler was muxed between the two slots.
  *    Now there are two dedicated instances:
@@ -50,13 +21,6 @@
  *    to forward to the APB req FIFO; it no longer needs to steer inputs.
  *    This removes the combinational mux on the disassembler inputs and makes
  *    the timing path cleaner.
- *
- * 4. WRITE-WRITE COLLISION DETECTION (cache-line granularity)
- *    When a new write burst arrives and an in-flight write burst touches
- *    the same cache line, the new write is held in SLOT_IDLE until the
- *    in-flight burst completes.
- *    Controlled by CACHE_LINE_SIZE parameter (default 64 bytes).
- *    Detection is purely combinational; no new state is added.
  *
  * 3. ANTI-STARVATION: read priority latch + starvation counter
  *    Writes are still favoured by default.  After WR_STARVE_THRESH writes
@@ -93,7 +57,7 @@
  *   - register_file       : 2-slot ping-pong buffer for assembled AXI responses
  *
  * ============================================================================
- * HOW EACH REQUEST IS TRACKED
+ * HOW EACH REQUEST IS TRACKED  (unchanged)
  * ============================================================================
  * ... (see previous revision for full narrative)
  *
@@ -109,6 +73,9 @@
  *
  * Write slot drives u_disassembler_wr / u_apb_req_builder_wr.
  * Read  slot drives u_disassembler_rd / u_apb_req_builder_rd.
+ * When both slots are write or both are read (impossible with 1 write + 1 read
+ * queues), the separate instances still work correctly because each is wired to
+ * its slot's own beat_addr / wr_data independently.
  *
  *------------------------------------------------------------------------------*/
 `timescale 1ns/1ps
@@ -121,12 +88,7 @@ import struct_types::*;
 	// waiting, rd_priority is latched and the next idle slot is forced to
 	// take a read.  Writes are still favoured in the normal (non-priority)
 	// path.  Set to 0 to disable (writes always win).
-	parameter WR_STARVE_THRESH = 4, // 0 = disabled
-	// Collision detection: two concurrent transactions that touch the same
-	// cache line and have a RAW/WAR/WAW dependency are serialised -- the
-	// second waits in SLOT_IDLE until the first completes.
-	// Must be a power of 2 and >= 8 (one AXI beat).
-	parameter CACHE_LINE_SIZE  = 64 // bytes
+	parameter WR_STARVE_THRESH = 4  // 0 = disabled
 )
 (
 	input  logic        clk,
@@ -254,63 +216,6 @@ import struct_types::*;
 	logic                     rd_priority;
 
 	/*=====================================================================*/
-	/*  Collision detection state (WaW, RaW, WaR)                        */
-	/*=====================================================================*/
-	// CL_BITS: number of low address bits that identify position within
-	//   a cache line.  Two addresses share a cache line iff they agree on
-	//   all bits above CL_BITS.
-	//
-	// Incoming WRITE range (FIFO head):
-	//   inc_cl_start/end  -- cache-line index range of the pending write
-	//
-	// Incoming READ range (FIFO head):
-	//   inc_rd_cl_start/end -- cache-line index range of the pending read
-	//
-	// Per-slot WRITE range:
-	//   slot_cl_start/end -- derived from slot_wr_req (awaddr/awlen/awsize)
-	//
-	// Per-slot READ range:
-	//   slot_rd_cl_start/end -- derived from slot_rd_req (araddr/arlen/arsize)
-	//
-	// Collision flags (one per in-flight slot):
-	//   slot_wr_collision[gc] : WaW -- incoming write vs in-flight write
-	//   slot_raw_collision[gc]: RaW -- incoming write vs in-flight read
-	//   slot_war_collision[gc]: WaR -- incoming read  vs in-flight write
-	//
-	// Global OR flags gate the SLOT_IDLE accept conditions:
-	//   wr_collision  -- blocks a new write  (WaW hazard present)
-	//   raw_collision -- blocks a new write  (RaW hazard present)
-	//   war_collision -- blocks a new read   (WaR hazard present)
-
-	localparam CL_BITS = $clog2(CACHE_LINE_SIZE);
-
-	// Cache-line range of the incoming write (FIFO head)
-	logic [ADDR_WIDTH-1:0]  inc_cl_start;       // lowest  CL index touched by incoming write
-	logic [ADDR_WIDTH-1:0]  inc_cl_end;         // highest CL index touched by incoming write
-
-	// Cache-line range of the incoming read (FIFO head)
-	logic [ADDR_WIDTH-1:0]  inc_rd_cl_start;    // lowest  CL index touched by incoming read
-	logic [ADDR_WIDTH-1:0]  inc_rd_cl_end;      // highest CL index touched by incoming read
-
-	// Cache-line range of each in-flight slot's write burst
-	logic [ADDR_WIDTH-1:0]  slot_cl_start    [0:NUM_SLOTS-1];
-	logic [ADDR_WIDTH-1:0]  slot_cl_end      [0:NUM_SLOTS-1];
-
-	// Cache-line range of each in-flight slot's read burst
-	logic [ADDR_WIDTH-1:0]  slot_rd_cl_start [0:NUM_SLOTS-1];
-	logic [ADDR_WIDTH-1:0]  slot_rd_cl_end   [0:NUM_SLOTS-1];
-
-	// Per-slot collision flags
-	logic                   slot_wr_collision  [0:NUM_SLOTS-1]; // WaW
-	logic                   slot_raw_collision [0:NUM_SLOTS-1]; // RaW: incoming write vs in-flight read
-	logic                   slot_war_collision [0:NUM_SLOTS-1]; // WaR: incoming read  vs in-flight write
-
-	// Global collision flags
-	logic                   wr_collision;   // OR of slot_wr_collision  -- gates write accept
-	logic                   raw_collision;  // OR of slot_raw_collision -- gates write accept
-	logic                   war_collision;  // OR of slot_war_collision -- gates read  accept
-
-	/*=====================================================================*/
 	/*  Combinational per-slot derived signals                            */
 	/*=====================================================================*/
 
@@ -335,45 +240,43 @@ import struct_types::*;
 	/*  which builder output goes into the FIFO.                          */
 	/*=====================================================================*/
 
-	logic                     dis_wr_valid_lsb;
-	logic                     dis_wr_valid_msb;
-	logic [ADDR_WIDTH-1:0]    dis_wr_lsb_addr;
-	logic [ADDR_WIDTH-1:0]    dis_wr_msb_addr;
-	logic [PDATA_WIDTH-1:0]   dis_wr_lsb_wdata;
-	logic [PDATA_WIDTH-1:0]   dis_wr_msb_wdata;
-	logic [PSTRB_WIDTH-1:0]   dis_wr_lsb_pstrb;
-	logic [PSTRB_WIDTH-1:0]   dis_wr_msb_pstrb;
+	// --- Write disassembler I/O ---
+	logic                    dis_wr_slot;          // which slot feeds wr disassembler
+	logic [ADDR_WIDTH-1:0]   dis_wr_beat_addr;
+	logic [MAX_SIZE-1:0]     dis_wr_beat_size;
+	logic [DATA_WIDTH-1:0]   dis_wr_wdata;
+	logic [WSTRB_WIDTH-1:0]  dis_wr_wstrb;
 
-	logic                     dis_rd_valid_lsb;
-	logic                     dis_rd_valid_msb;
-	logic [ADDR_WIDTH-1:0]    dis_rd_lsb_addr;
-	logic [ADDR_WIDTH-1:0]    dis_rd_msb_addr;
+	logic [ADDR_WIDTH-1:0]   dis_wr_lsb_addr,  dis_wr_msb_addr;
+	logic [PDATA_WIDTH-1:0]  dis_wr_lsb_wdata, dis_wr_msb_wdata;
+	logic [PSTRB_WIDTH-1:0]  dis_wr_lsb_pstrb, dis_wr_msb_pstrb;
+	logic                    dis_wr_valid_lsb,  dis_wr_valid_msb;
 
-	// Disassembler input mux wires
-	logic                     dis_wr_slot;
-	logic                     dis_rd_slot;
-	logic [ADDR_WIDTH-1:0]    dis_wr_beat_addr;
-	logic [MAX_SIZE-1:0]      dis_wr_beat_size;
-	logic [DATA_WIDTH-1:0]    dis_wr_wdata;
-	logic [DATA_WIDTH/8-1:0]  dis_wr_wstrb;
-	logic [ADDR_WIDTH-1:0]    dis_rd_beat_addr;
-	logic [MAX_SIZE-1:0]      dis_rd_beat_size;
+	struct_types::apb_struct builder_wr_apb_lsb, builder_wr_apb_msb;
 
-	// Per-slot valid flags resolved to the correct disassembler
-	logic                     slot_valid_lsb [0:NUM_SLOTS-1];
-	logic                     slot_valid_msb [0:NUM_SLOTS-1];
+	// --- Read disassembler I/O ---
+	logic                    dis_rd_slot;          // which slot feeds rd disassembler
+	logic [ADDR_WIDTH-1:0]   dis_rd_beat_addr;
+	logic [MAX_SIZE-1:0]     dis_rd_beat_size;
+	// wdata / wstrb are tied to 0 in the instantiation (is_wr=0 always)
 
-	// Builder outputs
-	struct_types::apb_struct  builder_wr_apb_lsb;
-	struct_types::apb_struct  builder_wr_apb_msb;
-	struct_types::apb_struct  builder_rd_apb_lsb;
-	struct_types::apb_struct  builder_rd_apb_msb;
+	logic [ADDR_WIDTH-1:0]   dis_rd_lsb_addr,  dis_rd_msb_addr;
+	logic [PDATA_WIDTH-1:0]  dis_rd_lsb_wdata, dis_rd_msb_wdata; // always 0
+	logic [PSTRB_WIDTH-1:0]  dis_rd_lsb_pstrb, dis_rd_msb_pstrb; // always 0
+	logic                    dis_rd_valid_lsb,  dis_rd_valid_msb;
 
-	// Push-arbitration mux: which slot's builder feeds the FIFO
-	logic                     dis_slot;
+	struct_types::apb_struct builder_rd_apb_lsb, builder_rd_apb_msb;
 
 	/*=====================================================================*/
-	/*  Assembler wires                                                    */
+	/*  Per-slot valid signals (from the appropriate disassembler)        */
+	/*  Used in SLOT_DISPATCH to decide which expected flags to clear.    */
+	/*=====================================================================*/
+	// For slot s: use the wr disassembler outputs if slot_is_wr[s], else rd.
+	logic                    slot_valid_lsb [0:NUM_SLOTS-1]; // combinational
+	logic                    slot_valid_msb [0:NUM_SLOTS-1]; // combinational
+
+	/*=====================================================================*/
+	/*  Assembler / axi_resp_builder shared wires                        */
 	/*=====================================================================*/
 
 	logic                     asm_slot;
@@ -381,51 +284,43 @@ import struct_types::*;
 	logic [RRESP_WIDTH-1:0]   asm_rresp;
 	logic [BRESP_WIDTH-1:0]   asm_bresp;
 
-	/*=====================================================================*/
-	/*  axi_resp_builder wires                                             */
-	/*=====================================================================*/
-
-	struct_types::axi_rd_data rb_rd_data;
-	struct_types::axi_wr_resp rb_wr_resp;
+	struct_types::axi_rd_data resp_rd_data;
+	struct_types::axi_wr_resp resp_wr_resp;
 
 	/*=====================================================================*/
-	/*  register_file wires                                                */
+	/*  Register file wires                                                */
 	/*=====================================================================*/
 
-	logic                     rf_enable_wr;
-	logic                     rf_done_wr;
-	logic [ID_WIDTH-1:0]      rf_txn_id_wr;
-	struct_types::axi_wr_resp rf_axi_wr_resp_in;
-	struct_types::axi_wr_resp rf_axi_wr_resp_out;
-	logic [ID_WIDTH-1:0]      rf_wr_id_out;
-	logic                     rf_wr_valid;
+	logic                       rf_enable_wr, rf_done_wr, rf_wr_valid;
+	logic [ID_WIDTH-1:0]        rf_txn_id_wr, rf_wr_id_out;
+	struct_types::axi_wr_resp   rf_axi_wr_resp_in, rf_axi_wr_resp_out;
 
-	logic                     rf_enable_rd;
-	logic                     rf_done_rd;
-	logic [ID_WIDTH-1:0]      rf_txn_id_rd;
-	struct_types::axi_rd_data rf_axi_rd_data_in;
-	struct_types::axi_rd_data rf_axi_rd_data_out;
-	logic [ID_WIDTH-1:0]      rf_rd_id_out;
-	logic                     rf_rd_valid;
+	logic                       rf_enable_rd, rf_done_rd, rf_rd_valid;
+	logic [ID_WIDTH-1:0]        rf_txn_id_rd, rf_rd_id_out;
+	struct_types::axi_rd_data   rf_axi_rd_data_in, rf_axi_rd_data_out;
 
 	/*=====================================================================*/
-	/*  s0_takes_wr/rd -- slot-0-wins signals for slot 1                  */
-	/*  slot_req_latched, slot_lsb_done, slot_msb_done                    */
-	/*  slot_wants_*_pop                                                   */
+	/*  Pop want signals                                                   */
 	/*=====================================================================*/
 
-	logic s0_takes_wr        [0:NUM_SLOTS-1];
-	logic s0_takes_rd        [0:NUM_SLOTS-1];
-	logic slot_req_latched   [0:NUM_SLOTS-1];
-	logic slot_lsb_done      [0:NUM_SLOTS-1];
-	logic slot_msb_done      [0:NUM_SLOTS-1];
 	logic slot_wants_wr_req_pop  [0:NUM_SLOTS-1];
 	logic slot_wants_rd_req_pop  [0:NUM_SLOTS-1];
 	logic slot_wants_wr_data_pop [0:NUM_SLOTS-1];
+
+	// Push arbitration winner (unchanged from previous revision)
+	logic dis_slot;             // 0 = slot 0 wins push arb, 1 = slot 1
+
+	// Intermediates for FSM (cannot be declared inside always_ff)
 	logic s0_dispatching;
+	logic s0_takes_wr        [0:NUM_SLOTS-1];
+	logic s0_takes_rd        [0:NUM_SLOTS-1];
+	logic slot_lsb_done      [0:NUM_SLOTS-1];
+	logic slot_msb_done      [0:NUM_SLOTS-1];
+	logic slot_req_latched   [0:NUM_SLOTS-1];
 
 	/*=====================================================================*/
-	/*  Sub-module instantiations                                          */
+	/*  Sub-module: write disassembler                                    */
+	/*  is_wr=1 hardwired; wdata/wstrb from the dispatching write slot.   */
 	/*=====================================================================*/
 
 	disassembler u_disassembler_wr (
@@ -434,15 +329,20 @@ import struct_types::*;
 		.beat_size  (dis_wr_beat_size),
 		.wdata      (dis_wr_wdata),
 		.wstrb      (dis_wr_wstrb),
-		.valid_lsb  (dis_wr_valid_lsb),
-		.valid_msb  (dis_wr_valid_msb),
 		.lsb_addr   (dis_wr_lsb_addr),
-		.msb_addr   (dis_wr_msb_addr),
 		.lsb_wdata  (dis_wr_lsb_wdata),
-		.msb_wdata  (dis_wr_msb_wdata),
 		.lsb_pstrb  (dis_wr_lsb_pstrb),
-		.msb_pstrb  (dis_wr_msb_pstrb)
+		.valid_lsb  (dis_wr_valid_lsb),
+		.msb_addr   (dis_wr_msb_addr),
+		.msb_wdata  (dis_wr_msb_wdata),
+		.msb_pstrb  (dis_wr_msb_pstrb),
+		.valid_msb  (dis_wr_valid_msb)
 	);
+
+	/*=====================================================================*/
+	/*  Sub-module: read disassembler                                     */
+	/*  is_wr=0 hardwired; wdata/wstrb tied to 0.                        */
+	/*=====================================================================*/
 
 	disassembler u_disassembler_rd (
 		.is_wr      (1'b0),
@@ -450,15 +350,19 @@ import struct_types::*;
 		.beat_size  (dis_rd_beat_size),
 		.wdata      ('0),
 		.wstrb      ('0),
-		.valid_lsb  (dis_rd_valid_lsb),
-		.valid_msb  (dis_rd_valid_msb),
 		.lsb_addr   (dis_rd_lsb_addr),
+		.lsb_wdata  (dis_rd_lsb_wdata),    // always 0
+		.lsb_pstrb  (dis_rd_lsb_pstrb),    // always 0
+		.valid_lsb  (dis_rd_valid_lsb),
 		.msb_addr   (dis_rd_msb_addr),
-		.lsb_wdata  (),
-		.msb_wdata  (),
-		.lsb_pstrb  (),
-		.msb_pstrb  ()
+		.msb_wdata  (dis_rd_msb_wdata),    // always 0
+		.msb_pstrb  (dis_rd_msb_pstrb),    // always 0
+		.valid_msb  (dis_rd_valid_msb)
 	);
+
+	/*=====================================================================*/
+	/*  Sub-module: apb_req_builder for write path                       */
+	/*=====================================================================*/
 
 	apb_req_builder u_apb_req_builder_wr (
 		.is_wr      (1'b1),
@@ -472,29 +376,41 @@ import struct_types::*;
 		.apb_msb    (builder_wr_apb_msb)
 	);
 
+	/*=====================================================================*/
+	/*  Sub-module: apb_req_builder for read path                        */
+	/*=====================================================================*/
+
 	apb_req_builder u_apb_req_builder_rd (
 		.is_wr      (1'b0),
 		.lsb_addr   (dis_rd_lsb_addr),
-		.lsb_wdata  ('0),
-		.lsb_pstrb  ('0),
+		.lsb_wdata  (dis_rd_lsb_wdata),    // 0
+		.lsb_pstrb  (dis_rd_lsb_pstrb),    // 0
 		.msb_addr   (dis_rd_msb_addr),
-		.msb_wdata  ('0),
-		.msb_pstrb  ('0),
+		.msb_wdata  (dis_rd_msb_wdata),    // 0
+		.msb_pstrb  (dis_rd_msb_pstrb),    // 0
 		.apb_lsb    (builder_rd_apb_lsb),
 		.apb_msb    (builder_rd_apb_msb)
 	);
 
+	/*=====================================================================*/
+	/*  Sub-module: assembler                                              */
+	/*=====================================================================*/
+
 	assembler u_assembler (
-		.valid_lsb   (slot_expected_lsb[asm_slot]),
-		.valid_msb   (slot_expected_msb[asm_slot]),
-		.lsb_prdata  (slot_lsb_prdata  [asm_slot]),
-		.lsb_pslverr (slot_lsb_pslverr [asm_slot]),
-		.msb_prdata  (slot_msb_prdata  [asm_slot]),
-		.msb_pslverr (slot_msb_pslverr [asm_slot]),
+		.valid_lsb   (slot_expected_lsb [asm_slot]),
+		.valid_msb   (slot_expected_msb [asm_slot]),
+		.lsb_prdata  (slot_lsb_prdata   [asm_slot]),
+		.lsb_pslverr (slot_lsb_pslverr  [asm_slot]),
+		.msb_prdata  (slot_msb_prdata   [asm_slot]),
+		.msb_pslverr (slot_msb_pslverr  [asm_slot]),
 		.rdata       (asm_rdata),
 		.rresp       (asm_rresp),
 		.bresp       (asm_bresp)
 	);
+
+	/*=====================================================================*/
+	/*  Sub-module: axi_resp_builder                                      */
+	/*=====================================================================*/
 
 	axi_resp_builder u_axi_resp_builder (
 		.transaction_id (slot_is_wr[asm_slot]
@@ -503,10 +419,16 @@ import struct_types::*;
 		.is_last        (slot_is_last[asm_slot]),
 		.rdata          (asm_rdata),
 		.rresp          (asm_rresp),
-		.bresp          (asm_bresp),
-		.rd_data        (rb_rd_data),
-		.wr_resp        (rb_wr_resp)
+		.bresp          (slot_is_wr[asm_slot]
+							? (slot_wr_burst_err[asm_slot] ? 2'b10 : asm_bresp)
+							: asm_bresp),
+		.rd_data        (resp_rd_data),
+		.wr_resp        (resp_wr_resp)
 	);
+
+	/*=====================================================================*/
+	/*  Sub-module: register_file                                         */
+	/*=====================================================================*/
 
 	register_file u_register_file (
 		.clk                (clk),
@@ -528,36 +450,256 @@ import struct_types::*;
 	);
 
 	/*=====================================================================*/
-	/*  register_file enable / done wiring                                */
+	/*  Beat address computation (combinational, per slot)                */
+	/*=====================================================================*/
+
+	generate
+		for (genvar gs = 0; gs < NUM_SLOTS; gs++) begin : gen_beat_addr
+			always_comb begin
+				slot_beat_size[gs] = slot_is_wr[gs]
+								   ? slot_wr_req[gs].awsize
+								   : slot_rd_req[gs].arsize;
+				slot_base_addr[gs] = slot_is_wr[gs]
+								   ? slot_wr_req[gs].awaddr
+								   : slot_rd_req[gs].araddr;
+
+				slot_beat_addr[gs] = slot_base_addr[gs]
+								   + (ADDR_WIDTH'(slot_beat_index[gs])
+									  << slot_beat_size[gs]);
+
+				slot_is_last[gs] = slot_is_wr[gs]
+								 ? slot_wr_data[gs].wlast
+								 : (slot_beat_index[gs] == slot_rd_req[gs].arlen);
+
+				resp_ready[gs] = (!slot_expected_lsb[gs] || slot_lsb_valid[gs]) &&
+								 (!slot_expected_msb[gs] || slot_msb_valid[gs]);
+			end
+		end
+	endgenerate
+
+	/*=====================================================================*/
+	/*  Disassembler input muxes                                          */
+	/*                                                                     */
+	/*  Each disassembler is permanently wired to its direction. We still  */
+	/*  need to pick WHICH slot's beat_addr/wdata to feed each one, since  */
+	/*  in principle either slot could be a write (or read).               */
+	/*                                                                     */
+	/*  Strategy: feed the disassembler the slot that is currently in      */
+	/*  SLOT_DISPATCH for that direction. If neither slot is dispatching   */
+	/*  in that direction, use slot 0 as a harmless default (outputs       */
+	/*  are unused in that case because the push gate won't fire).         */
 	/*=====================================================================*/
 
 	always_comb begin
-		rf_enable_wr       = 1'b0;
-		rf_enable_rd       = 1'b0;
-		rf_txn_id_wr       = '0;
-		rf_txn_id_rd       = '0;
-		rf_axi_wr_resp_in  = '0;
-		rf_axi_rd_data_in  = '0;
+		// --- Write disassembler input mux ---
+		// Find the dispatching write slot (slot 0 priority).
+		dis_wr_slot = 1'b0; // default: slot 0
+		for (int s = NUM_SLOTS-1; s >= 0; s--) begin
+			if (slot_state[s] == SLOT_DISPATCH && slot_is_wr[s] &&
+				slot_wr_req_latched[s])
+				dis_wr_slot = logic'(s);
+		end
 
+		dis_wr_beat_addr = slot_beat_addr[dis_wr_slot];
+		dis_wr_beat_size = slot_beat_size[dis_wr_slot];
+		dis_wr_wdata     = slot_wr_data[dis_wr_slot].wdata;
+		dis_wr_wstrb     = slot_wr_data[dis_wr_slot].wstrb;
+
+		// --- Read disassembler input mux ---
+		dis_rd_slot = 1'b0; // default: slot 0
+		for (int s = NUM_SLOTS-1; s >= 0; s--) begin
+			if (slot_state[s] == SLOT_DISPATCH && !slot_is_wr[s] &&
+				slot_rd_req_latched[s])
+				dis_rd_slot = logic'(s);
+		end
+
+		dis_rd_beat_addr = slot_beat_addr[dis_rd_slot];
+		dis_rd_beat_size = slot_beat_size[dis_rd_slot];
+	end
+
+	/*=====================================================================*/
+	/*  Per-slot valid_lsb/msb (from the appropriate disassembler)       */
+	/*  Used in SLOT_DISPATCH FSM for expected-flag management and        */
+	/*  lsb_done/msb_done computation.                                   */
+	/*=====================================================================*/
+
+	always_comb begin
 		for (int s = 0; s < NUM_SLOTS; s++) begin
-			if (slot_state[s] == SLOT_WAIT_RESP && resp_ready[s] &&
-				asm_slot == logic'(s)) begin
-				if (slot_is_wr[s]) begin
-				if (slot_is_last[s]) begin   // <-- only commit on wlast beat
-						rf_enable_wr      = 1'b1;
-						rf_txn_id_wr      = slot_wr_req[s].awid;
-						rf_axi_wr_resp_in = rb_wr_resp;
-					rf_axi_wr_resp_in.bresp = rb_wr_resp.bresp | {slot_wr_burst_err[s], 1'b0};
+			if (slot_is_wr[s]) begin
+				slot_valid_lsb[s] = dis_wr_valid_lsb && (dis_wr_slot == logic'(s));
+				slot_valid_msb[s] = dis_wr_valid_msb && (dis_wr_slot == logic'(s));
+			end else begin
+				slot_valid_lsb[s] = dis_rd_valid_lsb && (dis_rd_slot == logic'(s));
+				slot_valid_msb[s] = dis_rd_valid_msb && (dis_rd_slot == logic'(s));
+			end
+		end
+	end
+
+	/*=====================================================================*/
+	/*  Push arbitration: dis_slot                                        */
+	/*                                                                     */
+	/*  dis_slot selects WHICH builder's LSB/MSB outputs go to the FIFO. */
+	/*  Slot 0 wins if it is dispatching and has unsent halves.           */
+	/*  Logic is unchanged from the single-disassembler version except    */
+	/*  it no longer needs to steer disassembler inputs -- those are      */
+	/*  handled by dis_wr_slot / dis_rd_slot above.                       */
+	/*=====================================================================*/
+
+	always_comb begin
+		s0_dispatching = (slot_state[0] == SLOT_DISPATCH) &&
+						 (slot_wr_req_latched[0] || slot_rd_req_latched[0]) &&
+						 (!slot_lsb_sent[0] || !slot_msb_sent[0]);
+
+		dis_slot = s0_dispatching ? 1'b0 : 1'b1;
+	end
+
+	/*=====================================================================*/
+	/*  Assembler input mux                                                */
+	/*=====================================================================*/
+
+	always_comb begin
+		asm_slot = (slot_state[0] == SLOT_WAIT_RESP && resp_ready[0]) ? 1'b0 : 1'b1;
+	end
+
+	/*=====================================================================*/
+	/*  FIFO pop want signals (per slot, combinational)                   */
+	/*=====================================================================*/
+
+	generate
+		for (genvar gp = 0; gp < NUM_SLOTS; gp++) begin : gen_pop_wants
+			always_comb begin
+				slot_wants_wr_req_pop [gp] = 1'b0;
+				slot_wants_rd_req_pop [gp] = 1'b0;
+				slot_wants_wr_data_pop[gp] = 1'b0;
+
+				if (slot_state[gp] == SLOT_IDLE) begin
+					if (!wr_req_empty && !wr_data_empty && !s0_takes_wr[gp]) begin
+						slot_wants_wr_req_pop [gp] = 1'b1;
+						slot_wants_wr_data_pop[gp] = 1'b1;  // beat 0
+					end else if ((wr_req_empty || wr_data_empty) &&
+								!rd_req_empty && !s0_takes_rd[gp])
+						slot_wants_rd_req_pop[gp] = 1'b1;
 				end
-				end else begin
-					rf_enable_rd      = 1'b1;
-					rf_txn_id_rd      = slot_rd_req[s].arid;
-					rf_axi_rd_data_in = rb_rd_data;
+
+				// Pop next beat's data in DISPATCH only when:
+				// - data not yet latched (returning from WAIT_RESP)
+				// - wlast was NOT set on the previous beat (burst not done)
+				// - FIFO has data
+				// The pop fires cycle N, dout updates cycle N+1 when
+				// slot_wr_data_latched goes high and push can proceed.
+				if (slot_state[gp] == SLOT_DISPATCH) begin
+					if (slot_is_wr[gp]              &&
+						!slot_wr_data_latched[gp]   &&  // need new data
+						!wr_data_empty)
+						slot_wants_wr_data_pop[gp] = 1'b1;
+				end
+			end
+		end
+	endgenerate
+
+	/*=====================================================================*/
+	/*  FIFO pop arbitration                                               */
+	/*=====================================================================*/
+
+	always_comb begin
+		wr_req_pop_n  = 1'b1;
+		rd_req_pop_n  = 1'b1;
+		wr_data_pop_n = 1'b1;
+
+		if      (slot_wants_wr_req_pop[0])  wr_req_pop_n  = 1'b0;
+		else if (slot_wants_wr_req_pop[1])  wr_req_pop_n  = 1'b0;
+
+		if      (slot_wants_rd_req_pop[0])  rd_req_pop_n  = 1'b0;
+		else if (slot_wants_rd_req_pop[1])  rd_req_pop_n  = 1'b0;
+
+		if      (slot_wants_wr_data_pop[0]) wr_data_pop_n = 1'b0;
+		else if (slot_wants_wr_data_pop[1]) wr_data_pop_n = 1'b0;
+	end
+
+	/*=====================================================================*/
+	/*  APB request push + sideband tag push                              */
+	/*                                                                     */
+	/*  dis_slot selects which builder's outputs to forward.              */
+	/*  For slot s: if slot_is_wr[s] use builder_wr_*, else builder_rd_*  */
+	/*  dis_valid_lsb/msb are resolved from slot_valid_lsb/msb[s] since  */
+	/*  each disassembler is already wired to the correct slot.           */
+	/*=====================================================================*/
+
+	always_comb begin
+		apb_req_push_n  = 1'b1;
+		apb_req_fifo_in = '0;
+		apb_tag_push_n  = 1'b1;
+		apb_tag_fifo_in = '0;
+
+		if (!apb_req_full && !apb_tag_full) begin
+			for (int s = 0; s < NUM_SLOTS; s++) begin
+				if (apb_req_push_n &&
+					slot_state[s] == SLOT_DISPATCH &&
+					(slot_wr_req_latched[s] || slot_rd_req_latched[s]) &&
+					dis_slot == logic'(s)) begin
+
+					// Select the correct builder's outputs for this slot's direction
+					// and check the slot-specific valid flags.
+					if (!slot_lsb_sent[s] && slot_valid_lsb[s]) begin
+						apb_req_push_n  = 1'b0;
+						apb_req_fifo_in = slot_is_wr[s] ? builder_wr_apb_lsb
+														: builder_rd_apb_lsb;
+						apb_tag_push_n  = 1'b0;
+						apb_tag_fifo_in = '{slot: logic'(s), is_msb: 1'b0};
+					end else if ((slot_lsb_sent[s] || !slot_valid_lsb[s]) &&
+								 !slot_msb_sent[s] && slot_valid_msb[s]) begin
+						apb_req_push_n  = 1'b0;
+						apb_req_fifo_in = slot_is_wr[s] ? builder_wr_apb_msb
+														: builder_rd_apb_msb;
+						apb_tag_push_n  = 1'b0;
+						apb_tag_fifo_in = '{slot: logic'(s), is_msb: 1'b1};
+					end
 				end
 			end
 		end
 	end
-	
+
+	/*=====================================================================*/
+	/*  APB response pop + sideband tag pop                               */
+	/*=====================================================================*/
+
+	always_comb begin
+		apb_resp_pop_n = 1'b1;
+		apb_tag_pop_n  = 1'b1;
+
+		if (!apb_resp_empty && !apb_tag_empty) begin
+			if (slot_state[apb_tag_fifo_out.slot] == SLOT_WAIT_RESP) begin
+				apb_resp_pop_n = 1'b0;
+				apb_tag_pop_n  = 1'b0;
+			end
+		end
+	end
+
+	/*=====================================================================*/
+	/*  Register file push                                                 */
+	/*=====================================================================*/
+
+	always_comb begin
+		rf_enable_wr      = 1'b0;
+		rf_txn_id_wr      = '0;
+		rf_axi_wr_resp_in = '0;
+		rf_enable_rd      = 1'b0;
+		rf_txn_id_rd      = '0;
+		rf_axi_rd_data_in = '0;
+
+		if (slot_state[asm_slot] == SLOT_WAIT_RESP && resp_ready[asm_slot]) begin
+			if (slot_is_wr[asm_slot] && slot_wr_data[asm_slot].wlast) begin
+				rf_enable_wr      = 1'b1;
+				rf_txn_id_wr      = slot_wr_req[asm_slot].awid;
+				rf_axi_wr_resp_in = resp_wr_resp;
+			end else if (!slot_is_wr[asm_slot]) begin
+				rf_enable_rd      = 1'b1;
+				rf_txn_id_rd      = slot_rd_req[asm_slot].arid;
+				rf_axi_rd_data_in = resp_rd_data;
+			end
+		end
+	end
+
 	assign wr_resp_push_n  = !(rf_wr_valid && !wr_resp_full);
 	assign wr_resp_fifo_in = rf_axi_wr_resp_out;
 	assign rf_done_wr      = !wr_resp_push_n;
@@ -565,108 +707,6 @@ import struct_types::*;
 	assign rd_data_push_n  = !(rf_rd_valid && !rd_data_full);
 	assign rd_data_fifo_in = rf_axi_rd_data_out;
 	assign rf_done_rd      = !rd_data_push_n;
-
-	/*=====================================================================*/
-	/*  Collision detection logic (WaW, RaW, WaR)                        */
-	/*=====================================================================*/
-
-	// -----------------------------------------------------------------------
-	// Cache-line range for the INCOMING WRITE (FIFO head)
-	// burst_bytes = (awlen+1) << awsize
-	// end_addr    = awaddr + burst_bytes - 1
-	// -----------------------------------------------------------------------
-	always_comb begin : comb_inc_wr_cl
-		logic [ADDR_WIDTH-1:0] inc_burst_bytes;
-		logic [ADDR_WIDTH-1:0] inc_end_addr;
-		inc_burst_bytes = ADDR_WIDTH'(wr_req_fifo_out.awlen + 1)
-						  << wr_req_fifo_out.awsize;
-		inc_end_addr    = wr_req_fifo_out.awaddr + inc_burst_bytes - 1;
-		inc_cl_start    = wr_req_fifo_out.awaddr >> CL_BITS;
-		inc_cl_end      = inc_end_addr            >> CL_BITS;
-	end
-
-	// -----------------------------------------------------------------------
-	// Cache-line range for the INCOMING READ (FIFO head)
-	// burst_bytes = (arlen+1) << arsize
-	// end_addr    = araddr + burst_bytes - 1
-	// -----------------------------------------------------------------------
-	always_comb begin : comb_inc_rd_cl
-		logic [ADDR_WIDTH-1:0] inc_rd_burst_bytes;
-		logic [ADDR_WIDTH-1:0] inc_rd_end_addr;
-		inc_rd_burst_bytes = ADDR_WIDTH'(rd_req_fifo_out.arlen + 1)
-							 << rd_req_fifo_out.arsize;
-		inc_rd_end_addr    = rd_req_fifo_out.araddr + inc_rd_burst_bytes - 1;
-		inc_rd_cl_start    = rd_req_fifo_out.araddr >> CL_BITS;
-		inc_rd_cl_end      = inc_rd_end_addr        >> CL_BITS;
-	end
-
-	// -----------------------------------------------------------------------
-	// Per-slot cache-line ranges and collision flags
-	// Ranges [a,b] and [c,d] overlap iff NOT (b < c OR d < a).
-	// -----------------------------------------------------------------------
-	generate
-		for (genvar gc = 0; gc < NUM_SLOTS; gc++) begin : gen_cl_check
-			always_comb begin : comb_slot_cl
-				logic [ADDR_WIDTH-1:0] slot_burst_bytes;
-				logic [ADDR_WIDTH-1:0] slot_end_addr;
-				logic [ADDR_WIDTH-1:0] slot_rd_burst_bytes;
-				logic [ADDR_WIDTH-1:0] slot_rd_end_addr;
-
-				// --- Write CL range for this slot ---
-				slot_burst_bytes     = ADDR_WIDTH'(slot_wr_req[gc].awlen + 1)
-									   << slot_wr_req[gc].awsize;
-				slot_end_addr        = slot_wr_req[gc].awaddr + slot_burst_bytes - 1;
-				slot_cl_start[gc]    = slot_wr_req[gc].awaddr >> CL_BITS;
-				slot_cl_end  [gc]    = slot_end_addr           >> CL_BITS;
-
-				// --- Read CL range for this slot ---
-				slot_rd_burst_bytes     = ADDR_WIDTH'(slot_rd_req[gc].arlen + 1)
-										  << slot_rd_req[gc].arsize;
-				slot_rd_end_addr        = slot_rd_req[gc].araddr + slot_rd_burst_bytes - 1;
-				slot_rd_cl_start[gc]    = slot_rd_req[gc].araddr >> CL_BITS;
-				slot_rd_cl_end  [gc]    = slot_rd_end_addr       >> CL_BITS;
-
-				// --- WaW: incoming WRITE vs in-flight WRITE ---
-				slot_wr_collision[gc] =
-					(slot_state[gc] != SLOT_IDLE) &&
-					slot_is_wr[gc]                &&
-					!(inc_cl_end         < slot_cl_start[gc] ||
-					  slot_cl_end  [gc]  < inc_cl_start);
-
-				// --- RaW: incoming WRITE vs in-flight READ ---
-				// Hold a new write if a currently active READ touches the
-				// same cache line(s).  Compare incoming write range against
-				// the in-flight slot's READ range.
-				slot_raw_collision[gc] =
-					(slot_state[gc] != SLOT_IDLE) &&
-					!slot_is_wr[gc]               &&
-					!(inc_cl_end            < slot_rd_cl_start[gc] ||
-					  slot_rd_cl_end  [gc]  < inc_cl_start);
-
-				// --- WaR: incoming READ vs in-flight WRITE ---
-				// Hold a new read if a currently active WRITE touches the
-				// same cache line(s).  Compare incoming read range against
-				// the in-flight slot's WRITE range.
-				slot_war_collision[gc] =
-					(slot_state[gc] != SLOT_IDLE) &&
-					slot_is_wr[gc]                &&
-					!(inc_rd_cl_end       < slot_cl_start[gc] ||
-					  slot_cl_end  [gc]   < inc_rd_cl_start);
-			end
-		end
-	endgenerate
-
-	// Global OR flags
-	always_comb begin
-		wr_collision  = 1'b0;
-		raw_collision = 1'b0;
-		war_collision = 1'b0;
-		for (int c = 0; c < NUM_SLOTS; c++) begin
-			wr_collision  = wr_collision  | slot_wr_collision [c];
-			raw_collision = raw_collision | slot_raw_collision[c];
-			war_collision = war_collision | slot_war_collision[c];
-		end
-	end
 
 	/*=====================================================================*/
 	/*  Combinational intermediates for per-slot FSM                      */
@@ -677,34 +717,32 @@ import struct_types::*;
 			// s0_takes_wr/rd: true when slot 0 is also idle this cycle and
 			// will win the same direction, so slot 1 must not also pop that
 			// FIFO.  rd_priority inverts the normal write-first preference.
-			//
-			// Write gate: blocked by WaW (wr_collision) OR RaW (raw_collision).
-			// Read  gate: blocked by WaR (war_collision).
 			s0_takes_wr[i] = (i == 1) &&
 							  (slot_state[0] == SLOT_IDLE) &&
 							  !wr_req_empty && !wr_data_empty &&
-							  !rd_priority &&
-							  !wr_collision &&    // no WaW hazard
-							  !raw_collision;     // no RaW hazard
+							  !rd_priority;   // slot 0 won't take wr when rd_priority
 
 			s0_takes_rd[i] = (i == 1) &&
 							  (slot_state[0] == SLOT_IDLE) &&
 							  !rd_req_empty &&
-							  !war_collision &&   // no WaR hazard
-							  (rd_priority ||
-							   (wr_req_empty || wr_data_empty));
+							  (rd_priority ||                       // forced read path
+							   (wr_req_empty || wr_data_empty));   // normal read path
 
 			slot_req_latched[i] = slot_is_wr[i]
 								 ? slot_wr_req_latched[i]
 								 : slot_rd_req_latched[i];
 
+			// lsb/msb_done: uses slot_valid_lsb/msb[i] which is already
+			// resolved to the correct disassembler for this slot's direction.
 			slot_lsb_done[i] = !slot_valid_lsb[i] || slot_lsb_sent[i] ||
 								(!apb_req_push_n && dis_slot == logic'(i) &&
+								(!slot_is_wr[i] || slot_wr_data_latched[i]) && 
 								 !slot_lsb_sent[i] && slot_valid_lsb[i]);
 
 			slot_msb_done[i] = !slot_valid_msb[i] || slot_msb_sent[i] ||
 								(!apb_req_push_n && dis_slot == logic'(i) &&
 								 (slot_lsb_sent[i] || !slot_valid_lsb[i]) &&
+								 (!slot_is_wr[i] || slot_wr_data_latched[i]) && 
 								 !slot_msb_sent[i] && slot_valid_msb[i]);
 		end
 	end
@@ -726,6 +764,8 @@ import struct_types::*;
 	//
 	// Disabled (all zeros) when WR_STARVE_THRESH==0.
 
+	// Detect write-accepted and read-accepted events this cycle
+	// across all slots.
 	logic wr_accepted_this_cycle;
 	logic rd_accepted_this_cycle;
 
@@ -735,16 +775,12 @@ import struct_types::*;
 		for (int s = 0; s < NUM_SLOTS; s++) begin
 			if (slot_state[s] == SLOT_IDLE) begin
 				// Write accepted: write condition fires
-				// (same guards as the FSM write condition below)
 				if (!wr_req_empty && !wr_data_empty &&
 					(!rd_priority || rd_req_empty) &&
-					!wr_collision && !raw_collision &&
 					!(s == 1 && s0_takes_wr[1]))
 					wr_accepted_this_cycle = 1'b1;
 				// Read accepted: read condition fires
-				// (same guards as the FSM read condition below)
 				if (!rd_req_empty &&
-					!war_collision &&
 					(rd_priority || wr_req_empty || wr_data_empty) &&
 					!(s == 1 && s0_takes_rd[1]))
 					rd_accepted_this_cycle = 1'b1;
@@ -757,17 +793,22 @@ import struct_types::*;
 			wr_starve_cnt <= '0;
 			rd_priority   <= 1'b0;
 		end else if (WR_STARVE_THRESH == 0) begin
+			// Feature disabled: hold zeros
 			wr_starve_cnt <= '0;
 			rd_priority   <= 1'b0;
 		end else begin
+			// rd_priority: assert when threshold reached, clear on read accept
 			if (rd_accepted_this_cycle) begin
 				rd_priority   <= 1'b0;
 				wr_starve_cnt <= '0;
 			end else if (rd_req_empty) begin
+				// No reads pending -- reset counter, no starvation possible
 				wr_starve_cnt <= '0;
 				rd_priority   <= 1'b0;
 			end else if (wr_accepted_this_cycle && !rd_priority) begin
+				// A write was accepted while a read was waiting
 				if (wr_starve_cnt == STARVE_W'(WR_STARVE_THRESH - 1)) begin
+					// Threshold reached: latch priority, reset counter
 					rd_priority   <= 1'b1;
 					wr_starve_cnt <= '0;
 				end else begin
@@ -817,20 +858,15 @@ import struct_types::*;
 						// Priority path (rd_priority=1): read beats write.
 						// In both cases the losing direction is still accepted
 						// when the winning direction has nothing pending.
-						//
-						// Hazard gates (new in this revision):
-						//   Write is additionally blocked by:
-						//     wr_collision  -- WaW: in-flight write on same CL
-						//     raw_collision -- RaW: in-flight read  on same CL
-						//   Read is additionally blocked by:
-						//     war_collision -- WaR: in-flight write on same CL
 
 							// --- Write condition ---
+							// Accepted when: write FIFOs non-empty AND
+							//   either rd_priority is clear (normal: write wins)
+							//   or     rd_req is empty (priority: no read to favour)
+							// AND slot 0 is not already taking a write this cycle.
 							if (!wr_req_empty && !wr_data_empty &&
 								(!rd_priority || rd_req_empty) &&
-								!s0_takes_wr[gi] &&
-								!wr_collision  &&   // no WaW cache-line hazard
-								!raw_collision) begin  // no RaW cache-line hazard
+								!s0_takes_wr[gi]) begin
 								slot_state           [gi] <= SLOT_DISPATCH;
 								slot_is_wr           [gi] <= 1'b1;
 								slot_wr_req          [gi] <= wr_req_fifo_out;
@@ -839,8 +875,11 @@ import struct_types::*;
 								slot_wr_data_latched [gi] <= 1'b1;
 
 							// --- Read condition ---
+							// Accepted when: rd_req non-empty AND
+							//   either rd_priority is set (forced)
+							//   or     write FIFOs empty (normal fallback)
+							// AND slot 0 is not already taking a read this cycle.
 							end else if (!rd_req_empty &&
-										 !war_collision &&   // no WaR cache-line hazard
 										 (rd_priority ||
 										  wr_req_empty || wr_data_empty) &&
 										 !s0_takes_rd[gi]) begin
@@ -854,7 +893,6 @@ import struct_types::*;
 						/*---------------------------------------------------*/
 						SLOT_DISPATCH: begin
 						/*---------------------------------------------------*/
-
 							if (!wr_data_pop_n && slot_wants_wr_data_pop[gi]) begin
 								slot_wr_data        [gi] <= wr_data_fifo_out;
 								slot_wr_data_latched[gi] <= 1'b1;
@@ -865,16 +903,17 @@ import struct_types::*;
 									slot_lsb_sent    [gi] <= 1'b1;
 									slot_expected_lsb[gi] <= 1'b1;
 								end else if ((slot_lsb_sent[gi] || !slot_valid_lsb[gi]) &&
-											 !slot_msb_sent[gi] && slot_valid_msb[gi]) begin
+											!slot_msb_sent[gi] && slot_valid_msb[gi]) begin
 									slot_msb_sent    [gi] <= 1'b1;
 									slot_expected_msb[gi] <= 1'b1;
 								end
 							end
 
-							// BUG FIX: Clear expected flags only when THIS slot's
-							// disassembler says the half is not valid.
-							if (!slot_valid_lsb[gi]) slot_expected_lsb[gi] <= 1'b0;
-							if (!slot_valid_msb[gi]) slot_expected_msb[gi] <= 1'b0;
+							// Clear expected flags only if the half was never sent
+							// (narrow transfer with only one valid half).
+							// NOT after a push — slot_lsb/msb_sent guards against that.
+							if (!slot_valid_lsb[gi] && !slot_lsb_sent[gi]) slot_expected_lsb[gi] <= 1'b0;
+							if (!slot_valid_msb[gi] && !slot_msb_sent[gi]) slot_expected_msb[gi] <= 1'b0;
 
 							if (slot_req_latched[gi] && slot_lsb_done[gi] && slot_msb_done[gi])
 								slot_state[gi] <= SLOT_WAIT_RESP;
@@ -918,6 +957,9 @@ import struct_types::*;
 										slot_beat_index      [gi] <= '0;
 										slot_wr_burst_err    [gi] <= 1'b0;
 									end else begin
+										// Return to DISPATCH for the next beat.
+										// Clear data_latched so DISPATCH will pop
+										// the next wr_data entry from the FIFO.
 										slot_state           [gi] <= SLOT_DISPATCH;
 										slot_wr_data_latched [gi] <= 1'b0;
 										slot_beat_index      [gi] <= slot_beat_index[gi] + 1'b1;
@@ -943,199 +985,5 @@ import struct_types::*;
 			end
 		end
 	endgenerate
-
-	/*=====================================================================*/
-	/*  Combinational per-slot derived signals (generate)                 */
-	/*=====================================================================*/
-
-	generate
-		for (genvar gs = 0; gs < NUM_SLOTS; gs++) begin : gen_slot_comb
-			always_comb begin
-				slot_beat_size[gs] = slot_is_wr[gs]
-								   ? slot_wr_req[gs].awsize
-								   : slot_rd_req[gs].arsize;
-				slot_base_addr[gs] = slot_is_wr[gs]
-								   ? slot_wr_req[gs].awaddr
-								   : slot_rd_req[gs].araddr;
-
-				slot_beat_addr[gs] = slot_base_addr[gs]
-								   + (ADDR_WIDTH'(slot_beat_index[gs])
-									  << slot_beat_size[gs]);
-
-				slot_is_last[gs] = slot_is_wr[gs]
-								 ? slot_wr_data[gs].wlast
-								 : (slot_beat_index[gs] == slot_rd_req[gs].arlen);
-
-				resp_ready[gs] = (!slot_expected_lsb[gs] || slot_lsb_valid[gs]) &&
-								 (!slot_expected_msb[gs] || slot_msb_valid[gs]);
-			end
-		end
-	endgenerate
-
-	/*=====================================================================*/
-	/*  Disassembler input muxes                                          */
-	/*=====================================================================*/
-
-	always_comb begin
-		// --- Write disassembler input mux ---
-		dis_wr_slot = 1'b0;
-		for (int s = NUM_SLOTS-1; s >= 0; s--) begin
-			if (slot_state[s] == SLOT_DISPATCH && slot_is_wr[s] &&
-				slot_wr_req_latched[s])
-				dis_wr_slot = logic'(s);
-		end
-
-		dis_wr_beat_addr = slot_beat_addr[dis_wr_slot];
-		dis_wr_beat_size = slot_beat_size[dis_wr_slot];
-		dis_wr_wdata     = slot_wr_data[dis_wr_slot].wdata;
-		dis_wr_wstrb     = slot_wr_data[dis_wr_slot].wstrb;
-
-		// --- Read disassembler input mux ---
-		dis_rd_slot = 1'b0;
-		for (int s = NUM_SLOTS-1; s >= 0; s--) begin
-			if (slot_state[s] == SLOT_DISPATCH && !slot_is_wr[s] &&
-				slot_rd_req_latched[s])
-				dis_rd_slot = logic'(s);
-		end
-
-		dis_rd_beat_addr = slot_beat_addr[dis_rd_slot];
-		dis_rd_beat_size = slot_beat_size[dis_rd_slot];
-	end
-
-	/*=====================================================================*/
-	/*  Per-slot valid_lsb/msb (from the appropriate disassembler)       */
-	/*=====================================================================*/
-
-	always_comb begin
-		for (int s = 0; s < NUM_SLOTS; s++) begin
-			if (slot_is_wr[s]) begin
-				slot_valid_lsb[s] = dis_wr_valid_lsb && (dis_wr_slot == logic'(s));
-				slot_valid_msb[s] = dis_wr_valid_msb && (dis_wr_slot == logic'(s));
-			end else begin
-				slot_valid_lsb[s] = dis_rd_valid_lsb && (dis_rd_slot == logic'(s));
-				slot_valid_msb[s] = dis_rd_valid_msb && (dis_rd_slot == logic'(s));
-			end
-		end
-	end
-
-	/*=====================================================================*/
-	/*  Push arbitration: dis_slot                                        */
-	/*=====================================================================*/
-
-	always_comb begin
-		s0_dispatching = (slot_state[0] == SLOT_DISPATCH) &&
-						 (slot_wr_req_latched[0] || slot_rd_req_latched[0]) &&
-						 (!slot_lsb_sent[0] || !slot_msb_sent[0]);
-
-		dis_slot = s0_dispatching ? 1'b0 : 1'b1;
-	end
-
-	/*=====================================================================*/
-	/*  Assembler input mux                                                */
-	/*=====================================================================*/
-
-	always_comb begin
-		asm_slot = (slot_state[0] == SLOT_WAIT_RESP && resp_ready[0]) ? 1'b0 : 1'b1;
-	end
-
-	/*=====================================================================*/
-	/*  FIFO pop want signals (per slot, combinational)                   */
-	/*=====================================================================*/
-
-	generate
-		for (genvar gp = 0; gp < NUM_SLOTS; gp++) begin : gen_pop_wants
-			always_comb begin
-				slot_wants_wr_req_pop [gp] = 1'b0;
-				slot_wants_rd_req_pop [gp] = 1'b0;
-				slot_wants_wr_data_pop[gp] = 1'b0;
-
-				if (slot_state[gp] == SLOT_IDLE) begin
-					// Write pop: same guards as the FSM write condition
-					if (!wr_req_empty && !wr_data_empty &&
-						!wr_collision && !raw_collision &&
-						!s0_takes_wr[gp]) begin
-						slot_wants_wr_req_pop [gp] = 1'b1;
-						slot_wants_wr_data_pop[gp] = 1'b1;
-					// Read pop: same guards as the FSM read condition
-					end else if ((wr_req_empty || wr_data_empty || wr_collision || raw_collision) &&
-								 !rd_req_empty && !war_collision && !s0_takes_rd[gp]) begin
-						slot_wants_rd_req_pop[gp] = 1'b1;
-					end
-				end
-
-				if (slot_state[gp] == SLOT_DISPATCH) begin
-					if (slot_is_wr[gp]) begin
-						if (!wr_data_empty && slot_wr_req_latched[gp] &&
-							!slot_wr_data_latched[gp])
-							slot_wants_wr_data_pop[gp] = 1'b1;
-					end
-				end
-			end
-		end
-	endgenerate
-
-	/*=====================================================================*/
-	/*  FIFO pop arbitration                                               */
-	/*=====================================================================*/
-
-	always_comb begin
-		wr_req_pop_n  = 1'b1;
-		rd_req_pop_n  = 1'b1;
-		wr_data_pop_n = 1'b1;
-
-		if      (slot_wants_wr_req_pop[0])  wr_req_pop_n  = 1'b0;
-		else if (slot_wants_wr_req_pop[1])  wr_req_pop_n  = 1'b0;
-
-		if      (slot_wants_rd_req_pop[0])  rd_req_pop_n  = 1'b0;
-		else if (slot_wants_rd_req_pop[1])  rd_req_pop_n  = 1'b0;
-
-		if      (slot_wants_wr_data_pop[0]) wr_data_pop_n = 1'b0;
-		else if (slot_wants_wr_data_pop[1]) wr_data_pop_n = 1'b0;
-	end
-
-	/*=====================================================================*/
-	/*  APB request push + sideband tag push                              */
-	/*=====================================================================*/
-
-	always_comb begin
-		apb_req_push_n  = 1'b1;
-		apb_req_fifo_in = '0;
-		apb_tag_push_n  = 1'b1;
-		apb_tag_fifo_in = '0;
-
-		if (!apb_req_full && !apb_tag_full) begin
-			for (int s = 0; s < NUM_SLOTS; s++) begin
-				if (apb_req_push_n &&
-					slot_state[s] == SLOT_DISPATCH &&
-					(slot_wr_req_latched[s] || slot_rd_req_latched[s]) &&
-					dis_slot == logic'(s)) begin
-
-					if (!slot_lsb_sent[s] && slot_valid_lsb[s]) begin
-						apb_req_push_n  = 1'b0;
-						apb_req_fifo_in = slot_is_wr[s]
-										? builder_wr_apb_lsb
-										: builder_rd_apb_lsb;
-						apb_tag_push_n  = 1'b0;
-						apb_tag_fifo_in = '{slot: logic'(s), is_msb: 1'b0};
-					end else if ((slot_lsb_sent[s] || !slot_valid_lsb[s]) &&
-								 !slot_msb_sent[s] && slot_valid_msb[s]) begin
-						apb_req_push_n  = 1'b0;
-						apb_req_fifo_in = slot_is_wr[s]
-										? builder_wr_apb_msb
-										: builder_rd_apb_msb;
-						apb_tag_push_n  = 1'b0;
-						apb_tag_fifo_in = '{slot: logic'(s), is_msb: 1'b1};
-					end
-				end
-			end
-		end
-	end
-
-	/*=====================================================================*/
-	/*  APB response pop                                                   */
-	/*=====================================================================*/
-
-	assign apb_resp_pop_n = apb_resp_empty || apb_tag_empty;
-	assign apb_tag_pop_n  = apb_resp_pop_n;
 
 endmodule

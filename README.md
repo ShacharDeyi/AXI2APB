@@ -1,11 +1,16 @@
 # AXI2APB
 Shachar and Sahar's final project
 
-TODO
-* write a testbench
-* Error handling
-* RLAST handling - how do we know?
-* RRESP in AXI, what is it? p.67 in spec
+Final project in university - axi2apb bridge (verilog). 
+requirments: 
+•	Compatibility with AXI3 and APB4 standard
+•	Features:
+o	AXI data width wider or equal to APB (power of 2)
+o	INCR transactions only
+o	including NARROW transactions.
+o	Outstanding level TBD (Default – 2 reads/ 2writes)
+o	Maximum burst size - 64 bytes.
+•	Clock Frequency: 150 MHz
 
 
 HOW TO RUN

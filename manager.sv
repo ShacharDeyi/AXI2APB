@@ -30,9 +30,9 @@
  *    a read is actually accepted, and the counter resets.
  *    Set WR_STARVE_THRESH=0 to disable entirely.
  *
- * 2. BUG FIX: slot_expected_lsb/msb cleared too early in SLOT_DISPATCH
+ * 2. BUG FIX: slot_req_lsb_pending/msb cleared too early in SLOT_DISPATCH
  *    The unconditional
- *        if (!dis_valid_lsb) slot_expected_lsb[gi] <= 1'b0;
+ *        if (!dis_valid_lsb) slot_req_lsb_pending[gi] <= 1'b0;
  *    fired every DISPATCH cycle, including cycles where dis_slot pointed at
  *    the OTHER slot. dis_valid_lsb/msb then reflected the other slot's
  *    disassembler outputs and could spuriously clear expected flags.
@@ -183,18 +183,18 @@ import struct_types::*;
 	logic [7:0]               slot_beat_index     [0:NUM_SLOTS-1];
 
 	// Dispatch tracking
-	logic                     slot_lsb_sent       [0:NUM_SLOTS-1];
-	logic                     slot_msb_sent       [0:NUM_SLOTS-1];
-	logic                     slot_expected_lsb   [0:NUM_SLOTS-1];
-	logic                     slot_expected_msb   [0:NUM_SLOTS-1];
+	logic                     slot_req_lsb_pushed       [0:NUM_SLOTS-1];
+	logic                     slot_req_msb_pushed       [0:NUM_SLOTS-1];
+	logic                     slot_req_lsb_pending   [0:NUM_SLOTS-1];
+	logic                     slot_req_msb_pending   [0:NUM_SLOTS-1];
 
 	// APB response capture
-	logic [PDATA_WIDTH-1:0]   slot_lsb_prdata     [0:NUM_SLOTS-1];
-	logic                     slot_lsb_pslverr    [0:NUM_SLOTS-1];
-	logic                     slot_lsb_valid      [0:NUM_SLOTS-1];
-	logic [PDATA_WIDTH-1:0]   slot_msb_prdata     [0:NUM_SLOTS-1];
-	logic                     slot_msb_pslverr    [0:NUM_SLOTS-1];
-	logic                     slot_msb_valid      [0:NUM_SLOTS-1];
+	logic [PDATA_WIDTH-1:0]   slot_resp_lsb_data     [0:NUM_SLOTS-1];
+	logic                     slot_resp_lsb_err    [0:NUM_SLOTS-1];
+	logic                     slot_resp_lsb_done      [0:NUM_SLOTS-1];
+	logic [PDATA_WIDTH-1:0]   slot_resp_msb_data     [0:NUM_SLOTS-1];
+	logic                     slot_resp_msb_err    [0:NUM_SLOTS-1];
+	logic                     slot_resp_msb_done      [0:NUM_SLOTS-1];
 
 	// Write burst error accumulation
 	logic                     slot_wr_burst_err   [0:NUM_SLOTS-1];
@@ -219,7 +219,7 @@ import struct_types::*;
 	/*  Combinational per-slot derived signals                            */
 	/*=====================================================================*/
 
-	logic                     resp_ready          [0:NUM_SLOTS-1];
+	logic                     slot_resp_all_done          [0:NUM_SLOTS-1];
 	logic [ADDR_WIDTH-1:0]    slot_beat_addr      [0:NUM_SLOTS-1];
 	logic [MAX_SIZE-1:0]      slot_beat_size      [0:NUM_SLOTS-1];
 	logic [ADDR_WIDTH-1:0]    slot_base_addr      [0:NUM_SLOTS-1];
@@ -272,8 +272,8 @@ import struct_types::*;
 	/*  Used in SLOT_DISPATCH to decide which expected flags to clear.    */
 	/*=====================================================================*/
 	// For slot s: use the wr disassembler outputs if slot_is_wr[s], else rd.
-	logic                    slot_valid_lsb [0:NUM_SLOTS-1]; // combinational
-	logic                    slot_valid_msb [0:NUM_SLOTS-1]; // combinational
+	logic                    slot_req_lsb_valid [0:NUM_SLOTS-1]; // combinational
+	logic                    slot_req_msb_valid [0:NUM_SLOTS-1]; // combinational
 
 	/*=====================================================================*/
 	/*  Assembler / axi_resp_builder shared wires                        */
@@ -284,8 +284,8 @@ import struct_types::*;
 	logic [RRESP_WIDTH-1:0]   asm_rresp;
 	logic [BRESP_WIDTH-1:0]   asm_bresp;
 
-	struct_types::axi_rd_data resp_rd_data;
-	struct_types::axi_wr_resp resp_wr_resp;
+	struct_types::axi_rd_data axi_rd_resp_out;
+	struct_types::axi_wr_resp axi_wr_resp_out;
 
 	/*=====================================================================*/
 	/*  Register file wires                                                */
@@ -314,8 +314,8 @@ import struct_types::*;
 	logic s0_dispatching;
 	logic s0_takes_wr        [0:NUM_SLOTS-1];
 	logic s0_takes_rd        [0:NUM_SLOTS-1];
-	logic slot_lsb_done      [0:NUM_SLOTS-1];
-	logic slot_msb_done      [0:NUM_SLOTS-1];
+	logic slot_req_lsb_done      [0:NUM_SLOTS-1];
+	logic slot_req_msb_done      [0:NUM_SLOTS-1];
 	logic slot_req_latched   [0:NUM_SLOTS-1];
 
 	/*=====================================================================*/
@@ -397,12 +397,12 @@ import struct_types::*;
 	/*=====================================================================*/
 
 	assembler u_assembler (
-		.valid_lsb   (slot_expected_lsb [asm_slot]),
-		.valid_msb   (slot_expected_msb [asm_slot]),
-		.lsb_prdata  (slot_lsb_prdata   [asm_slot]),
-		.lsb_pslverr (slot_lsb_pslverr  [asm_slot]),
-		.msb_prdata  (slot_msb_prdata   [asm_slot]),
-		.msb_pslverr (slot_msb_pslverr  [asm_slot]),
+		.valid_lsb   (slot_req_lsb_pending [asm_slot]),
+		.valid_msb   (slot_req_msb_pending [asm_slot]),
+		.lsb_prdata  (slot_resp_lsb_data   [asm_slot]),
+		.lsb_pslverr (slot_resp_lsb_err  [asm_slot]),
+		.msb_prdata  (slot_resp_msb_data   [asm_slot]),
+		.msb_pslverr (slot_resp_msb_err  [asm_slot]),
 		.rdata       (asm_rdata),
 		.rresp       (asm_rresp),
 		.bresp       (asm_bresp)
@@ -422,8 +422,8 @@ import struct_types::*;
 		.bresp          (slot_is_wr[asm_slot]
 							? (slot_wr_burst_err[asm_slot] ? 2'b10 : asm_bresp)
 							: asm_bresp),
-		.rd_data        (resp_rd_data),
-		.wr_resp        (resp_wr_resp)
+		.rd_data        (axi_rd_resp_out),
+		.wr_resp        (axi_wr_resp_out)
 	);
 
 	/*=====================================================================*/
@@ -471,8 +471,8 @@ import struct_types::*;
 								 ? slot_wr_data[gs].wlast
 								 : (slot_beat_index[gs] == slot_rd_req[gs].arlen);
 
-				resp_ready[gs] = (!slot_expected_lsb[gs] || slot_lsb_valid[gs]) &&
-								 (!slot_expected_msb[gs] || slot_msb_valid[gs]);
+				slot_resp_all_done[gs] = (!slot_req_lsb_pending[gs] || slot_resp_lsb_done[gs]) &&
+								 (!slot_req_msb_pending[gs] || slot_resp_msb_done[gs]);
 			end
 		end
 	endgenerate
@@ -526,11 +526,11 @@ import struct_types::*;
 	always_comb begin
 		for (int s = 0; s < NUM_SLOTS; s++) begin
 			if (slot_is_wr[s]) begin
-				slot_valid_lsb[s] = dis_wr_valid_lsb && (dis_wr_slot == logic'(s));
-				slot_valid_msb[s] = dis_wr_valid_msb && (dis_wr_slot == logic'(s));
+				slot_req_lsb_valid[s] = dis_wr_valid_lsb && (dis_wr_slot == logic'(s));
+				slot_req_msb_valid[s] = dis_wr_valid_msb && (dis_wr_slot == logic'(s));
 			end else begin
-				slot_valid_lsb[s] = dis_rd_valid_lsb && (dis_rd_slot == logic'(s));
-				slot_valid_msb[s] = dis_rd_valid_msb && (dis_rd_slot == logic'(s));
+				slot_req_lsb_valid[s] = dis_rd_valid_lsb && (dis_rd_slot == logic'(s));
+				slot_req_msb_valid[s] = dis_rd_valid_msb && (dis_rd_slot == logic'(s));
 			end
 		end
 	end
@@ -548,7 +548,7 @@ import struct_types::*;
 	always_comb begin
 		s0_dispatching = (slot_state[0] == SLOT_DISPATCH) &&
 						 (slot_wr_req_latched[0] || slot_rd_req_latched[0]) &&
-						 (!slot_lsb_sent[0] || !slot_msb_sent[0]);
+						 (!slot_req_lsb_pushed[0] || !slot_req_msb_pushed[0]);
 
 		dis_slot = s0_dispatching ? 1'b0 : 1'b1;
 	end
@@ -558,7 +558,7 @@ import struct_types::*;
 	/*=====================================================================*/
 
 	always_comb begin
-		asm_slot = (slot_state[0] == SLOT_WAIT_RESP && resp_ready[0]) ? 1'b0 : 1'b1;
+		asm_slot = (slot_state[0] == SLOT_WAIT_RESP && slot_resp_all_done[0]) ? 1'b0 : 1'b1;
 	end
 
 	/*=====================================================================*/
@@ -621,7 +621,7 @@ import struct_types::*;
 	/*                                                                     */
 	/*  dis_slot selects which builder's outputs to forward.              */
 	/*  For slot s: if slot_is_wr[s] use builder_wr_*, else builder_rd_*  */
-	/*  dis_valid_lsb/msb are resolved from slot_valid_lsb/msb[s] since  */
+	/*  dis_valid_lsb/msb are resolved from slot_req_lsb_valid/msb[s] since  */
 	/*  each disassembler is already wired to the correct slot.           */
 	/*=====================================================================*/
 
@@ -635,19 +635,20 @@ import struct_types::*;
 			for (int s = 0; s < NUM_SLOTS; s++) begin
 				if (apb_req_push_n &&
 					slot_state[s] == SLOT_DISPATCH &&
+					(!slot_is_wr[s] || slot_wr_data_latched[s]) && 
 					(slot_wr_req_latched[s] || slot_rd_req_latched[s]) &&
 					dis_slot == logic'(s)) begin
 
 					// Select the correct builder's outputs for this slot's direction
 					// and check the slot-specific valid flags.
-					if (!slot_lsb_sent[s] && slot_valid_lsb[s]) begin
+					if (!slot_req_lsb_pushed[s] && slot_req_lsb_valid[s]) begin
 						apb_req_push_n  = 1'b0;
 						apb_req_fifo_in = slot_is_wr[s] ? builder_wr_apb_lsb
 														: builder_rd_apb_lsb;
 						apb_tag_push_n  = 1'b0;
 						apb_tag_fifo_in = '{slot: logic'(s), is_msb: 1'b0};
-					end else if ((slot_lsb_sent[s] || !slot_valid_lsb[s]) &&
-								 !slot_msb_sent[s] && slot_valid_msb[s]) begin
+					end else if ((slot_req_lsb_pushed[s] || !slot_req_lsb_valid[s]) &&
+								 !slot_req_msb_pushed[s] && slot_req_msb_valid[s]) begin
 						apb_req_push_n  = 1'b0;
 						apb_req_fifo_in = slot_is_wr[s] ? builder_wr_apb_msb
 														: builder_rd_apb_msb;
@@ -687,15 +688,15 @@ import struct_types::*;
 		rf_txn_id_rd      = '0;
 		rf_axi_rd_data_in = '0;
 
-		if (slot_state[asm_slot] == SLOT_WAIT_RESP && resp_ready[asm_slot]) begin
+		if (slot_state[asm_slot] == SLOT_WAIT_RESP && slot_resp_all_done[asm_slot]) begin
 			if (slot_is_wr[asm_slot] && slot_wr_data[asm_slot].wlast) begin
 				rf_enable_wr      = 1'b1;
 				rf_txn_id_wr      = slot_wr_req[asm_slot].awid;
-				rf_axi_wr_resp_in = resp_wr_resp;
+				rf_axi_wr_resp_in = axi_wr_resp_out;
 			end else if (!slot_is_wr[asm_slot]) begin
 				rf_enable_rd      = 1'b1;
 				rf_txn_id_rd      = slot_rd_req[asm_slot].arid;
-				rf_axi_rd_data_in = resp_rd_data;
+				rf_axi_rd_data_in = axi_rd_resp_out;
 			end
 		end
 	end
@@ -732,18 +733,18 @@ import struct_types::*;
 								 ? slot_wr_req_latched[i]
 								 : slot_rd_req_latched[i];
 
-			// lsb/msb_done: uses slot_valid_lsb/msb[i] which is already
+			// lsb/msb_done: uses slot_req_lsb_valid/msb[i] which is already
 			// resolved to the correct disassembler for this slot's direction.
-			slot_lsb_done[i] = !slot_valid_lsb[i] || slot_lsb_sent[i] ||
+			slot_req_lsb_done[i] = !slot_req_lsb_valid[i] || slot_req_lsb_pushed[i] ||
 								(!apb_req_push_n && dis_slot == logic'(i) &&
 								(!slot_is_wr[i] || slot_wr_data_latched[i]) && 
-								 !slot_lsb_sent[i] && slot_valid_lsb[i]);
+								 !slot_req_lsb_pushed[i] && slot_req_lsb_valid[i]);
 
-			slot_msb_done[i] = !slot_valid_msb[i] || slot_msb_sent[i] ||
+			slot_req_msb_done[i] = !slot_req_msb_valid[i] || slot_req_msb_pushed[i] ||
 								(!apb_req_push_n && dis_slot == logic'(i) &&
-								 (slot_lsb_sent[i] || !slot_valid_lsb[i]) &&
+								 (slot_req_lsb_pushed[i] || !slot_req_lsb_valid[i]) &&
 								 (!slot_is_wr[i] || slot_wr_data_latched[i]) && 
-								 !slot_msb_sent[i] && slot_valid_msb[i]);
+								 !slot_req_msb_pushed[i] && slot_req_msb_valid[i]);
 		end
 	end
 
@@ -836,16 +837,16 @@ import struct_types::*;
 					slot_rd_req_latched [gi] <= 1'b0;
 					slot_wr_data_latched[gi] <= 1'b0;
 					slot_beat_index     [gi] <= '0;
-					slot_lsb_sent       [gi] <= 1'b0;
-					slot_msb_sent       [gi] <= 1'b0;
-					slot_expected_lsb   [gi] <= 1'b0;
-					slot_expected_msb   [gi] <= 1'b0;
-					slot_lsb_prdata     [gi] <= '0;
-					slot_lsb_pslverr    [gi] <= 1'b0;
-					slot_lsb_valid      [gi] <= 1'b0;
-					slot_msb_prdata     [gi] <= '0;
-					slot_msb_pslverr    [gi] <= 1'b0;
-					slot_msb_valid      [gi] <= 1'b0;
+					slot_req_lsb_pushed       [gi] <= 1'b0;
+					slot_req_msb_pushed       [gi] <= 1'b0;
+					slot_req_lsb_pending   [gi] <= 1'b0;
+					slot_req_msb_pending   [gi] <= 1'b0;
+					slot_resp_lsb_data     [gi] <= '0;
+					slot_resp_lsb_err    [gi] <= 1'b0;
+					slot_resp_lsb_done      [gi] <= 1'b0;
+					slot_resp_msb_data     [gi] <= '0;
+					slot_resp_msb_err    [gi] <= 1'b0;
+					slot_resp_msb_done      [gi] <= 1'b0;
 					slot_wr_burst_err   [gi] <= 1'b0;
 				end else begin
 
@@ -899,23 +900,23 @@ import struct_types::*;
 							end
 
 							if (!apb_req_push_n && dis_slot == logic'(gi)) begin
-								if (!slot_lsb_sent[gi] && slot_valid_lsb[gi]) begin
-									slot_lsb_sent    [gi] <= 1'b1;
-									slot_expected_lsb[gi] <= 1'b1;
-								end else if ((slot_lsb_sent[gi] || !slot_valid_lsb[gi]) &&
-											!slot_msb_sent[gi] && slot_valid_msb[gi]) begin
-									slot_msb_sent    [gi] <= 1'b1;
-									slot_expected_msb[gi] <= 1'b1;
+								if (!slot_req_lsb_pushed[gi] && slot_req_lsb_valid[gi]) begin
+									slot_req_lsb_pushed    [gi] <= 1'b1;
+									slot_req_lsb_pending[gi] <= 1'b1;
+								end else if ((slot_req_lsb_pushed[gi] || !slot_req_lsb_valid[gi]) &&
+											!slot_req_msb_pushed[gi] && slot_req_msb_valid[gi]) begin
+									slot_req_msb_pushed    [gi] <= 1'b1;
+									slot_req_msb_pending[gi] <= 1'b1;
 								end
 							end
 
 							// Clear expected flags only if the half was never sent
 							// (narrow transfer with only one valid half).
-							// NOT after a push — slot_lsb/msb_sent guards against that.
-							if (!slot_valid_lsb[gi] && !slot_lsb_sent[gi]) slot_expected_lsb[gi] <= 1'b0;
-							if (!slot_valid_msb[gi] && !slot_msb_sent[gi]) slot_expected_msb[gi] <= 1'b0;
+							// NOT after a push  slot_lsb/msb_sent guards against that.
+							if (!slot_req_lsb_valid[gi] && !slot_req_lsb_pushed[gi]) slot_req_lsb_pending[gi] <= 1'b0;
+							if (!slot_req_msb_valid[gi] && !slot_req_msb_pushed[gi]) slot_req_msb_pending[gi] <= 1'b0;
 
-							if (slot_req_latched[gi] && slot_lsb_done[gi] && slot_msb_done[gi])
+							if (slot_req_latched[gi] && slot_req_lsb_done[gi] && slot_req_msb_done[gi])
 								slot_state[gi] <= SLOT_WAIT_RESP;
 						end
 
@@ -926,24 +927,24 @@ import struct_types::*;
 							if (!apb_resp_pop_n &&
 								apb_tag_fifo_out.slot == logic'(gi)) begin
 								if (!apb_tag_fifo_out.is_msb) begin
-									slot_lsb_prdata [gi] <= apb_resp_fifo_out.prdata;
-									slot_lsb_pslverr[gi] <= apb_resp_fifo_out.pslverr;
-									slot_lsb_valid  [gi] <= 1'b1;
+									slot_resp_lsb_data [gi] <= apb_resp_fifo_out.prdata;
+									slot_resp_lsb_err[gi] <= apb_resp_fifo_out.pslverr;
+									slot_resp_lsb_done  [gi] <= 1'b1;
 								end else begin
-									slot_msb_prdata [gi] <= apb_resp_fifo_out.prdata;
-									slot_msb_pslverr[gi] <= apb_resp_fifo_out.pslverr;
-									slot_msb_valid  [gi] <= 1'b1;
+									slot_resp_msb_data [gi] <= apb_resp_fifo_out.prdata;
+									slot_resp_msb_err[gi] <= apb_resp_fifo_out.pslverr;
+									slot_resp_msb_done  [gi] <= 1'b1;
 								end
 							end
 
-							if (resp_ready[gi] && asm_slot == logic'(gi)) begin
+							if (slot_resp_all_done[gi] && asm_slot == logic'(gi)) begin
 
-								slot_lsb_valid   [gi] <= 1'b0;
-								slot_msb_valid   [gi] <= 1'b0;
-								slot_lsb_sent    [gi] <= 1'b0;
-								slot_msb_sent    [gi] <= 1'b0;
-								slot_expected_lsb[gi] <= 1'b0;
-								slot_expected_msb[gi] <= 1'b0;
+								slot_resp_lsb_done   [gi] <= 1'b0;
+								slot_resp_msb_done   [gi] <= 1'b0;
+								slot_req_lsb_pushed    [gi] <= 1'b0;
+								slot_req_msb_pushed    [gi] <= 1'b0;
+								slot_req_lsb_pending[gi] <= 1'b0;
+								slot_req_msb_pending[gi] <= 1'b0;
 
 								if (slot_is_wr[gi]) begin
 									slot_wr_burst_err[gi] <=

@@ -103,8 +103,9 @@ package struct_types;
     // ordered (responses arrive in the same order as requests).
 
     typedef struct packed {
-        logic slot;   // which manager transaction slot (0 or 1)
-        logic is_msb; // which 32-bit half: 0=LSB (addr+0), 1=MSB (addr+4)
+        logic is_wr;     // 1 = write pipeline
+        logic slot_idx;  // which of the 2 slots for that direction
+        logic is_msb;    // LSB or MSB half
     } apb_tag_t;
 
 endpackage

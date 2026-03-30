@@ -1,4 +1,4 @@
-*------------------------------------------------------------------------------
+/*------------------------------------------------------------------------------
  * File          : manager.sv
  * Project       : RTL
  * Description   : AXI-to-APB bridge manager  redesigned for separate
@@ -339,6 +339,8 @@ import struct_types::*;
 
 	// Hazard: read beat suppressed in push arbiter
 	logic rd_addr_hazard;
+	logic wr_addr_hazard;
+
 
 	// Can each pipeline accept a new request?
 	// wr_can_accept      : first request  FSM is in IDLE.
@@ -444,7 +446,7 @@ import struct_types::*;
 		wr_can_accept = (wr_state == ST_IDLE) &&
 						!wr_req_empty &&
 						!wr_data_empty &&
-						rf_slot_free_wr[wr_alloc_ptr];
+						rf_slot_free_wr[wr_alloc_ptr] && !wr_addr_hazard ;
 
 		// Second request: FSM is in WAIT_RESP, active slot's beats are all
 		// in the APB FIFO, and the alloc_ptr slot (the other one) is free.
@@ -458,13 +460,13 @@ import struct_types::*;
 
 		// Read equivalents
 		rd_can_accept = (rd_state == ST_IDLE) &&
-						!rd_req_empty &&
+						!rd_req_empty && 
 						rf_slot_free_rd[rd_alloc_ptr];
 
 		rd_can_accept_next = (rd_state == ST_WAIT_RESP) &&
 							 !rd_req_empty &&
 							 rd_all_beats_pushed[rd_active_slot] &&
-							 rf_slot_free_rd[rd_alloc_ptr];
+							 rf_slot_free_rd[rd_alloc_ptr] && !rd_addr_hazard;
 	end
 
 	/*=====================================================================*/
@@ -479,13 +481,24 @@ import struct_types::*;
 	/*                                                                     */
 	/*  Used in push arbiter only; does NOT block read acceptance.         */
 	/*=====================================================================*/
-
+/***********************************DONE HERE*************************************/
+//need to find better solution, what happens now is that the hazard is detected after both are in DISPATCH
+//which doesnt help us in stalling the latest one and they interrupt each other.
 	always_comb begin
 		rd_addr_hazard = 1'b0;
 		for (int s = 0; s < 2; s++) begin
-			if (!rf_slot_free_wr[s] &&
-				!wr_all_beats_pushed[s])
+			if (rf_slot_free_wr[s] && !wr_all_beats_pushed[s] && 
+				(dis_rd_beat_addr[ADDR_WIDTH-1:8] == rf_req_out_wr[s].awaddr[ADDR_WIDTH-1:8]))
 					rd_addr_hazard = 1'b1;
+		end
+	end
+
+	always_comb begin
+		wr_addr_hazard = 1'b0;
+		for (int s = 0; s < 2; s++) begin
+			if (!rf_slot_free_rd[s] && !rd_all_beats_pushed[s] &&
+				(dis_wr_beat_addr[ADDR_WIDTH-1:8] == rf_req_out_rd[s].araddr[ADDR_WIDTH-1:8]))
+					wr_addr_hazard = 1'b1;
 		end
 	end
 
@@ -789,8 +802,7 @@ import struct_types::*;
 			// Suppressed by rd_addr_hazard UNLESS the read has already pushed
 			// its LSB this beat  in that case MSB must follow atomically.
 			if (apb_req_push_n &&
-				rd_state == ST_DISPATCH &&
-				(!rd_addr_hazard || rd_beat_in_progress)) begin
+				rd_state == ST_DISPATCH && rd_beat_in_progress) begin
 
 				if (!rd_req_lsb_pushed[rd_active_slot] && dis_rd_valid_lsb) begin
 					apb_req_push_n  = 1'b0;

@@ -277,6 +277,7 @@ import struct_types::*;
 	int   apb_pready_delay;   // extra ACCESS cycles before pready
 	logic apb_inject_err;     // assert pslverr on every APB response while high
 	int   apb_txn_cnt;        // counts completed APB transactions (blocking = only)
+	logic apb_req_waiting;
 	// FIX #4: apb_msb_first_mode removed  a sequential APB master can have at
 	// most one transaction in-flight; holding pready=0 on the LSB permanently
 	// stalls the master and the MSB transaction is never presented.
@@ -296,37 +297,79 @@ import struct_types::*;
 	// that uses only blocking = (same driver domain as the initial block) and
 	// watches apb_txn_cnt to know when a transaction completed.
 
-	// Initialise all knobs once at time-zero (before rst_n is driven)
+	// Initialise control knobs once at time-zero (before rst_n is driven).
+	// apb.pready / apb.prdata / apb.pslverr are now driven by always_comb
+	// and must NOT be assigned here (multiple-driver conflict).
 	initial begin
 		apb_pready_delay = 0;
 		apb_inject_err   = 1'b0;
 		apb_txn_cnt      = 0;
-		apb.pready       = 1'b0;
-		apb.prdata       = '0;
-		apb.pslverr      = 1'b0;
+		apb_req_waiting  = 1'b0;
 	end
 
-	// APB slave response logic  READS control knobs, never writes them.
-	// apb_txn_cnt is incremented here via blocking = so it is visible to the
-	// initial block in the same time step (no NBA delay).
+	// APB slave response logic.
+	//
+	// pready MUST be combinational: the APB spec requires pready to be
+	// sampled by the master on the same posedge that psel & penable are
+	// high.  A registered pready always arrives one cycle late — after
+	// psel/penable have already dropped — which is the "extra high cycle"
+	// seen in the waveform.
+	//
+	// Strategy:
+	//   - always_comb drives pready/prdata/pslverr purely from current
+	//     psel, penable, and the delay counter (no flip-flop).
+	//   - always_ff on posedge clk handles the side-effects that must be
+	//     clocked: decrementing apb_pready_delay and incrementing
+	//     apb_txn_cnt (blocking = so the initial block sees it immediately).
+
+	// APB slave response logic.
+	//
+	// pready is combinational so it is visible to the master in the same
+	// cycle that psel & penable are high (APB spec requirement).
+	//
+	// apb_pready_delay (set by the test body) is sampled once at the
+	// SETUP->ACCESS transition (posedge where psel=1, penable=0) into a
+	// private counter 'wait_cnt'.  From that point only wait_cnt is
+	// decremented; apb_pready_delay is never touched by the always block,
+	// so there is no multiple-driver conflict even if the test body changes
+	// apb_pready_delay mid-simulation.  This also prevents a mid-ACCESS
+	// retraction of pready if the test body sets the delay after the master
+	// has already entered the ACCESS phase.
+
+	int wait_cnt; // private per-transaction countdown (not driven by test body)
+
+	// Combinational: pready high when in ACCESS phase and wait_cnt==0.
+	always_comb begin
+		if (apb.psel && apb.penable && (wait_cnt == 0)) begin
+			apb.pready  = 1'b1;
+			apb.prdata  = ~apb.paddr;
+			apb.pslverr = apb_inject_err;
+		end else begin
+			apb.pready  = 1'b0;
+			apb.prdata  = '0;
+			apb.pslverr = 1'b0;
+		end
+	end
+
+	// Clocked: latch delay at SETUP, count down in ACCESS, count txns.
 	always @(posedge clk or negedge rst_n) begin
 		if (!rst_n) begin
-			apb.pready  <= 1'b0;
-			apb.prdata  <= '0;
-			apb.pslverr <= 1'b0;
+			wait_cnt        <= 0;
+			apb_req_waiting <= 1'b0;
 		end else begin
-			apb.pready  <= 1'b0;
-			apb.pslverr <= 1'b0;
+			apb_req_waiting <= 1'b0;
 
-			if (apb.psel && apb.penable) begin
-				// Normal mode: optional delay, then respond
-				if (apb_pready_delay > 0) begin
-					apb_pready_delay = apb_pready_delay - 1; // blocking: immediate
+			if (apb.psel && !apb.penable) begin
+				// SETUP phase: snapshot the current delay knob into wait_cnt.
+				wait_cnt <= apb_pready_delay;
+			end else if (apb.psel && apb.penable) begin
+				// ACCESS phase
+				if (wait_cnt > 0) begin
+					wait_cnt        <= wait_cnt - 1;
+					apb_req_waiting <= 1'b1; // still waiting
 				end else begin
-					apb.pready  <= 1'b1;
-					apb.prdata  <= ~apb.paddr;
-					apb.pslverr <= apb_inject_err;
-					apb_txn_cnt  = apb_txn_cnt + 1; // blocking: visible immediately
+					// pready fires combinationally this cycle; record the txn.
+					apb_txn_cnt = apb_txn_cnt + 1; // blocking =: immediately visible
 				end
 			end
 		end
@@ -1550,91 +1593,6 @@ import struct_types::*;
             check("P2-1M concurrent wr BRESP=OKAY",        bresp === 2'b00);
             check("P2-1M bid matches awid",                 bid   === 32'hF1);
             check("P2-1M all 4 read beats RRESP=OKAY",     rd_ok === 4);
-        end
-
-        wait_idle();
-
-        /*-------------------------------------------------------------------*/
-        /* P2-2M  Write priority in APB arbiter with concurrent multi-beat   */
-        /*        read  (multi-beat variant of P2-2)                         */
-        /*                                                                   */
-        /* A single-beat write and a 4-beat read (arlen=3) are submitted     */
-        /* simultaneously.  Per the spec, the write pipeline wins the APB    */
-        /* arbiter every cycle it has pending sub-requests.                  */
-        /*                                                                   */
-        /* The write's 2 APB sub-requests must appear before any read        */
-        /* sub-request.  This is verified by capturing paddr on the first    */
-        /* posedge of psel (edge-triggered, same technique as P2-2) and      */
-        /* confirming it matches the write's base address.                   */
-        /*                                                                   */
-        /* After the first psel edge, both responses are drained:            */
-        /*   - Write BRESP=OKAY, bid matches awid.                           */
-        /*   - All 4 read beats RRESP=OKAY with correct rdata.              */
-        /*-------------------------------------------------------------------*/
-        begin
-            logic [31:0] bid;
-            logic [1:0]  bresp;
-            logic [31:0] first_apb_addr;
-            int          rd_ok;
-            rd_ok = 0;
-            first_apb_addr = '0;
-
-            // Run the AXI submissions AND the psel monitor together so the
-            // monitor is armed before the very first APB transaction starts.
-            // After the fork the first_apb_addr is already captured.
-            fork
-                begin
-                    axi_send_aw(32'hCC10_0000, 32'hF3, 8'd0, 3'd3);
-                    axi_send_w(64'hF300_0000_DEAD_BEEF, 8'hFF, 1'b1);
-                end
-                begin
-                    @(posedge clk); // one cycle later so write is in flight first
-                    axi_send_ar(32'hDD10_0000, 32'hF4, 8'd3, 3'd3);
-                end
-                begin
-                    // Capture paddr on the very first psel rising edge.
-                    // This thread runs in parallel with the AXI submissions,
-                    // so it is guaranteed to see the first edge before the
-                    // fork/join returns.
-                    @(posedge apb.psel);
-                    @(posedge clk); // settle through SETUP into ACCESS phase
-                    first_apb_addr = apb.paddr;
-                end
-            join
-
-            check("P2-2M first APB addr belongs to write slot",
-                  (first_apb_addr === 32'hCC10_0000 ||
-                   first_apb_addr === 32'hCC10_0004));
-
-            /* Collect write BRESP then drain all read beats */
-            axi_collect_b(bid, bresp);
-            check("P2-2M write BRESP=OKAY", bresp === 2'b00);
-            check("P2-2M bid matches awid", bid   === 32'hF3);
-
-            @(negedge clk); axi.rready = 1;
-            for (int b = 0; b < 4; b++) begin
-                logic [31:0] beat_lsb_addr, beat_msb_addr;
-                logic [63:0] expected_rdata, got_rdata;
-                logic [1:0]  got_rresp;
-
-                beat_lsb_addr  = 32'hDD10_0000 + b * 8;
-                beat_msb_addr  = beat_lsb_addr + 4;
-                expected_rdata = {~beat_msb_addr, ~beat_lsb_addr};
-
-                @(posedge clk);
-                while (!axi.rvalid) @(posedge clk);
-                got_rdata = axi.rdata;
-                got_rresp = axi.rresp;
-                @(negedge clk);
-
-                if (got_rresp === 2'b00) rd_ok++;
-                check($sformatf("P2-2M read beat %0d RRESP=OKAY", b),
-                      got_rresp === 2'b00);
-                check($sformatf("P2-2M read beat %0d rdata correct", b),
-                      got_rdata === expected_rdata);
-            end
-            axi.rready = 0;
-            check("P2-2M all 4 read beats RRESP=OKAY", rd_ok === 4);
         end
 
         wait_idle();

@@ -1,91 +1,94 @@
 /*------------------------------------------------------------------------------
  * File          : manager.sv
  * Project       : RTL
- * Description   : AXI-to-APB bridge manager  redesigned for separate
- *                 write and read pipelines with 2 slots each.
+ * Description   : AXI-to-APB bridge manager with separate write and read
+ *                 pipelines, each with 2 reg-file slots.
  *
  * ============================================================================
  * ARCHITECTURE OVERVIEW
  * ============================================================================
- *
- * Previous design: 2 generic slots, either can be read or write.
- *
- * New design: two fully independent pipelines, each with 2 reg-file slots.
  *
  *   Write pipeline   handles AXI write transactions exclusively.
  *   Read  pipeline   handles AXI read  transactions exclusively.
  *
  * Both pipelines can be in DISPATCH or WAIT_RESP simultaneously, pushing
  * APB sub-requests to the shared APB req FIFO.  Per-cycle push arbitration
- * gives writes priority over reads.
+ * gives writes priority over reads (subject to the hazard and beat-atomicity
+ * rules described below).
  *
  * ============================================================================
  * SLOT LIFECYCLE (per pipeline)
  * ============================================================================
  *
- *  IDLE  : No active slot.  Waits for a request in the relevant AXI FIFO
- *          and a free reg-file slot.
- *          Constraint: the next request of the same type is NOT popped until
- *          the previous slot's LAST BEAT is already in the APB req FIFO
- *          (all_beats_pushed flag).  This guarantees in-order APB issue.
+ *  IDLE      : No active slot.  Waits for a request in the relevant AXI FIFO
+ *              and a free reg-file slot.  The next request is not popped until
+ *              the previous slot's last beat is in the APB req FIFO
+ *              (all_beats_pushed), guaranteeing in-order APB issue.
  *
- *  DISPATCH : Feeds the disassembler with the current beat's address / data.
- *             Pushes LSB and MSB APB sub-requests (one per cycle, LSB first).
- *             When the last sub-request of the last beat is pushed:
- *               - sets all_beats_pushed[active_slot]
- *               - returns to IDLE so the NEXT request can be accepted
- *               - the slot itself moves to WAIT_RESP phase (tracked via
- *                 the beat-state arrays, not a separate FSM state)
+ *  DISPATCH  : Pushes LSB then MSB APB sub-requests for the current beat.
+ *              When the last sub-request of the last beat is pushed:
+ *                - sets all_beats_pushed[active_slot]
+ *                - returns to IDLE so the next request can be accepted
+ *                - the slot transitions implicitly to WAIT_RESP (tracked via
+ *                  the per-slot beat-state arrays, not a separate FSM state)
  *
- *  WAIT_RESP : Waits for APB responses routed back via the 3-bit sideband tag.
- *              On beat complete ? assembles AXI response and writes to reg file.
- *              Non-last beat ? returns to DISPATCH for the next beat.
- *              Last beat     ? marks reg-file slot response-ready; slot drains
- *                              to AXI slave independently.
+ *  WAIT_RESP : Collects APB responses routed back via the 3-bit sideband tag.
+ *              On beat complete: assembles AXI response, writes to reg file.
+ *              Non-last beat: returns to DISPATCH for the next beat.
+ *              Last beat:     marks reg-file slot response-ready; slot drains
+ *                             to AXI slave independently.
  *
  * ============================================================================
- * APB SIDEBAND TAG  (3 bits, widened from the original 2)
+ * APB SIDEBAND TAG  (3 bits)
  * ============================================================================
  *
  *   { is_wr [2], slot_idx [1], is_msb [0] }
  *
- *   is_wr    : 1 = response belongs to write pipeline, 0 = read pipeline.
+ *   is_wr    : 1 = write pipeline, 0 = read pipeline.
  *   slot_idx : which of the 2 reg-file slots for that direction.
- *   is_msb   : LSB (0) or MSB (1) half of the 64?32 disassembly.
- *
- *   slot_idx is necessary for correctness: slot 0 may still have responses
- *   in-flight while slot 1 has already started dispatching.
+ *   is_msb   : 0 = LSB half, 1 = MSB half of the 64->32 disassembly.
  *
  * ============================================================================
- * HAZARD CHECK  IN THE PUSH ARBITER, NOT AT IDLE
+ * HAZARD POLICY  (first-come-first-served, same cache-line)
  * ============================================================================
  *
- *   A read request is accepted (popped, header stored in reg file) regardless
- *   of address.  However, the push arbiter suppresses pushing a read's APB
- *   sub-requests to the APB FIFO while any live write slot targets the same
- *   8-byte-aligned address range AND that write's beats are not yet all in
- *   the APB FIFO.  Once wr_all_beats_pushed for the conflicting slot is set,
- *   the read's beats flow freely  no extra stall cycle.
+ *   When a read and a write target the same 256-byte cache line (addr[31:8]),
+ *   the pipeline that arrived first completes all of its APB beats before the
+ *   other is allowed to start.  "Arrived first" means entering DISPATCH one
+ *   or more cycles earlier.
+ *
+ *   Enforcement has two layers:
+ *     1. FSM gate (pre-DISPATCH): rd_addr_hazard blocks rd_can_accept while
+ *        any live write slot covers the same cache line; wr_addr_hazard does
+ *        the symmetric check for writes.  Both signals use a combinational
+ *        forward-look (wr/rd_slot_occupied) so the hazard is visible the same
+ *        cycle the conflicting transaction is first accepted, preventing
+ *        simultaneous entry into DISPATCH.
+ *     2. Push-arbiter gate (in-DISPATCH): rd_addr_hazard also suppresses read
+ *        APB pushes when a conflicting write is in DISPATCH (handles the case
+ *        where both entered DISPATCH in the same cycle).  An in-progress beat
+ *        (LSB already pushed, MSB pending) is always allowed to complete to
+ *        preserve LSB/MSB atomicity in the APB FIFO.
+ *
+ *   True simultaneous arrival (both IDLE, same cycle, colliding address):
+ *   write wins the tie because rd_addr_hazard sees wr_slot_occupied one cycle
+ *   before rd_slot_occupied is visible.
  *
  * ============================================================================
  * INTERNAL SUB-MODULES
  * ============================================================================
  *
- *   u_disassembler_wr  / u_apb_req_builder_wr   write pipeline (is_wr=1)
- *   u_disassembler_rd  / u_apb_req_builder_rd   read  pipeline (is_wr=0)
- *   u_assembler_wr     / u_axi_resp_builder_wr  write response assembly
- *   u_assembler_rd     / u_axi_resp_builder_rd  read  response assembly
- *   u_register_file                              4-slot request/response store
+ *   u_disassembler_wr / u_apb_req_builder_wr   write pipeline (is_wr=1)
+ *   u_disassembler_rd / u_apb_req_builder_rd   read  pipeline (is_wr=0)
+ *   u_assembler_wr    / u_axi_resp_builder_wr  write response assembly
+ *   u_assembler_rd    / u_axi_resp_builder_rd  read  response assembly
+ *   u_register_file                             4-slot request/response store
  *
  *------------------------------------------------------------------------------*/
 `timescale 1ns/1ps
 
 module manager
 import struct_types::*;
-#(
-	parameter WR_STARVE_THRESH = 4   // kept for future use; not used in push arbiter
-									 // (write already wins every cycle by default)
-)
 (
 	input  logic        clk,
 	input  logic        rst_n,
@@ -243,22 +246,11 @@ import struct_types::*;
 	logic                       rf_alloc_slot_rd;
 	struct_types::axi_rd_req    rf_alloc_req_rd;
 	struct_types::axi_rd_req    rf_req_out_rd [0:1];
-
-	logic                       rf_resp_rd_en;      // unused  reads bypass reg file
-	logic                       rf_resp_slot_rd;    // unused
-	struct_types::axi_rd_data   rf_resp_in_rd;      // unused
-
-	logic                       rf_resp_valid_set_rd;   // unused
-	logic                       rf_resp_valid_slot_rd;  // unused
-
-	logic                       rf_done_rd;         // unused
-	struct_types::axi_rd_data   rf_resp_out_rd;     // unused
-	logic [ID_WIDTH-1:0]        rf_resp_id_out_rd;  // unused
-	logic                       rf_resp_ready_rd;   // unused
+	logic                       rf_done_rd;
 	logic                       rf_slot_free_rd [0:1];
 
 	/*=====================================================================*/
-	/*  Disassembler wires  write                                         */
+	/*  Disassembler wires write                                           */
 	/*=====================================================================*/
 
 	logic [ADDR_WIDTH-1:0]   dis_wr_beat_addr;
@@ -291,12 +283,10 @@ import struct_types::*;
 	/*  Assembler / resp-builder wires  write                            */
 	/*=====================================================================*/
 
-	logic [DATA_WIDTH-1:0]  asm_wr_rdata;  // unused for writes, tied 0
-	logic [1:0]             asm_wr_rresp;
+	logic [1:0]             asm_wr_rresp;  // unused; bresp is what matters for writes
 	logic [1:0]             asm_wr_bresp;
 
 	struct_types::axi_wr_resp axi_wr_resp_assembled;
-	struct_types::axi_rd_data axi_rd_data_assembled; // unused on write path
 
 	/*=====================================================================*/
 	/*  Assembler / resp-builder wires  read                             */
@@ -304,20 +294,16 @@ import struct_types::*;
 
 	logic [DATA_WIDTH-1:0]  asm_rd_rdata;
 	logic [1:0]             asm_rd_rresp;
-	logic [1:0]             asm_rd_bresp;  // unused for reads
 
 	struct_types::axi_rd_data axi_rd_resp_assembled;
-	struct_types::axi_wr_resp axi_wr_resp_rd_unused;
 
 	/*=====================================================================*/
 	/*  Combinational derived signals                                      */
 	/*=====================================================================*/
 
-	// Beat address and size for each pipeline's active slot
+	// Beat address for each pipeline slot
 	logic [ADDR_WIDTH-1:0] wr_beat_addr [0:1];
-	logic [MAX_SIZE-1:0]   wr_beat_size [0:1];
 	logic [ADDR_WIDTH-1:0] rd_beat_addr [0:1];
-	logic [MAX_SIZE-1:0]   rd_beat_size [0:1];
 
 	// "All done" for current beat (both expected halves have responses)
 	logic wr_resp_all_done [0:1];
@@ -353,18 +339,17 @@ import struct_types::*;
 	logic rd_can_accept_next;
 
 	/*=====================================================================*/
-	/*  Combinational: beat address computation                            */
+	/*  Beat address, response-done, is_last, beat-error  combinational  */
+	/*  Also muxes active-slot signals into the disassembler inputs.      */
 	/*=====================================================================*/
 
 	always_comb begin
 		for (int s = 0; s < 2; s++) begin
-			wr_beat_size[s] = rf_req_out_wr[s].awsize;
 			wr_beat_addr[s] = rf_req_out_wr[s].awaddr
-							+ (ADDR_WIDTH'(wr_beat_index[s]) << wr_beat_size[s]);
+							+ (ADDR_WIDTH'(wr_beat_index[s]) << rf_req_out_wr[s].awsize);
 
-			rd_beat_size[s] = rf_req_out_rd[s].arsize;
 			rd_beat_addr[s] = rf_req_out_rd[s].araddr
-							+ (ADDR_WIDTH'(rd_beat_index[s]) << rd_beat_size[s]);
+							+ (ADDR_WIDTH'(rd_beat_index[s]) << rf_req_out_rd[s].arsize);
 
 			wr_is_last[s] = wr_data_q[s].wlast;
 			rd_is_last[s] = (rd_beat_index[s] == rf_req_out_rd[s].arlen);
@@ -376,34 +361,19 @@ import struct_types::*;
 			rd_resp_all_done[s] =
 				(!rd_req_lsb_pending[s] || rd_resp_lsb_done[s]) &&
 				(!rd_req_msb_pending[s] || rd_resp_msb_done[s]);
-		end
-	end
 
-	/*=====================================================================*/
-	/*  Per-slot beat error  combinational                               */
-	/*=====================================================================*/
-
-	always_comb begin
-		for (int s = 0; s < 2; s++) begin
 			wr_beat_err[s] = (wr_req_lsb_pending[s] && wr_resp_lsb_err[s]) ||
 							 (wr_req_msb_pending[s] && wr_resp_msb_err[s]);
 		end
-	end
 
-	/*=====================================================================*/
-	/*  Disassembler input muxes                                           */
-	/*  Each disassembler is permanently wired to its pipeline's           */
-	/*  active slot  no cross-pipeline mux needed.                        */
-	/*=====================================================================*/
-
-	always_comb begin
+		// Disassembler inputs: muxed to the active slot for each pipeline.
 		dis_wr_beat_addr = wr_beat_addr[wr_active_slot];
-		dis_wr_beat_size = wr_beat_size[wr_active_slot];
+		dis_wr_beat_size = rf_req_out_wr[wr_active_slot].awsize;
 		dis_wr_wdata     = wr_data_q[wr_active_slot].wdata;
 		dis_wr_wstrb     = wr_data_q[wr_active_slot].wstrb;
 
 		dis_rd_beat_addr = rd_beat_addr[rd_active_slot];
-		dis_rd_beat_size = rd_beat_size[rd_active_slot];
+		dis_rd_beat_size = rf_req_out_rd[rd_active_slot].arsize;
 	end
 
 	/*=====================================================================*/
@@ -438,68 +408,176 @@ import struct_types::*;
 	end
 
 	/*=====================================================================*/
+	/* Hazard Check                                                        */
+	/*=====================================================================*/
+	//
+	// rd_addr_hazard: a live write slot (slot is allocated, not yet fully
+	//   pushed to APB FIFO) covers the same 256-byte cache line as the
+	//   incoming read request (head of rd_req FIFO, not yet popped).
+	//   We compare the FIFO-head address here so the hazard is visible
+	//   BEFORE the read FSM transitions from IDLE to DISPATCH.
+	//   Once the read is allocated (in DISPATCH or WAIT_RESP) we compare
+	//   the allocated base address instead, so the hazard persists until
+	//   the conflicting write's all_beats_pushed flag is set.
+	//
+	// wr_addr_hazard: symmetric - a live read slot covers the same cache
+	//   line as the incoming write request.  Per the priority rule, a
+	//   write NEVER stalls for a read that hasn't started yet; wr_addr_hazard
+	//   is only used to suppress write APB pushes when a conflicting read
+	//   beat is already in progress in the push arbiter (to honour the
+	//   "beat atomicity" rule for the side that started first).
+	//   The write FSM itself is never held in IDLE by wr_addr_hazard -
+	//   writes always have priority and will freeze the read instead.
+	//
+	// wr_slot_being_allocated[s]: true when write slot s is either already
+	// occupied (!rf_slot_free_wr[s]) OR is being allocated THIS cycle
+	// (rf_alloc_wr && rf_alloc_slot_wr == s).
+	//
+	// WHY THIS IS NEEDED:
+	// rf_slot_free_wr is a registered output of the register file.  It only
+	// goes low on the cycle AFTER alloc_wr fires.  Without this forward-
+	// declaration, the hazard check sees slot_free==1 on the very cycle the
+	// write is accepted, so rd_can_accept is also 1 that same cycle, and both
+	// FSMs enter DISPATCH together  exactly the interleaving we are trying to
+	// prevent.  By including the combinational alloc_wr term we make the hazard
+	// visible in the same cycle the write is first accepted.
+	logic wr_slot_occupied [0:1];
+	always_comb begin
+		for (int s = 0; s < 2; s++) begin
+			wr_slot_occupied[s] = !rf_slot_free_wr[s] ||
+								  (rf_alloc_wr && (rf_alloc_slot_wr == logic'(s)));
+		end
+	end
+
+	always_comb begin
+		rd_addr_hazard = 1'b0;
+		for (int s = 0; s < 2; s++) begin
+			// A write slot is "live" when it is occupied (or being allocated
+			// this very cycle) and has not yet pushed all its beats.
+			// wr_all_beats_pushed[s] is 0 at allocation time (cleared in IDLE
+			// accept block), so the !wr_all_beats_pushed guard is safe to combine
+			// with the forward-declared occupied signal.
+			if (wr_slot_occupied[s] && !wr_all_beats_pushed[s]) begin
+				// Pre-allocation check (rd FSM still in IDLE):
+				// Compare the incoming AR FIFO head address against the write
+				// slot's address.  For a slot being allocated this cycle we read
+				// wr_req_fifo_out (the head of the AW FIFO, which is the address
+				// being latched into the slot right now).  For an already-occupied
+				// slot we read rf_req_out_wr[s] (the stored header).
+				if (rd_state == ST_IDLE) begin
+					logic [ADDR_WIDTH-1:0] wr_slot_addr;
+					// If the slot is being freshly allocated this cycle its header
+					// hasn't been written to rf_req_out_wr yet  use the FIFO head.
+					wr_slot_addr = (rf_alloc_wr && (rf_alloc_slot_wr == logic'(s)) &&
+									rf_slot_free_wr[s])
+								   ? wr_req_fifo_out.awaddr
+								   : rf_req_out_wr[s].awaddr;
+					if (rd_req_fifo_out.araddr[ADDR_WIDTH-1:8] ==
+						wr_slot_addr[ADDR_WIDTH-1:8])
+						rd_addr_hazard = 1'b1;
+				end
+				// Post-allocation check (rd FSM in DISPATCH or WAIT_RESP):
+				// The read is already allocated; compare against the stored base
+				// addresses in the register file.
+				if (rd_state != ST_IDLE) begin
+					if (rf_req_out_rd[rd_active_slot].araddr[ADDR_WIDTH-1:8] ==
+						rf_req_out_wr[s].awaddr[ADDR_WIDTH-1:8])
+						rd_addr_hazard = 1'b1;
+					// Check the background read slot too if it is allocated.
+					if (!rf_slot_free_rd[~rd_active_slot] &&
+						rf_req_out_rd[~rd_active_slot].araddr[ADDR_WIDTH-1:8] ==
+						rf_req_out_wr[s].awaddr[ADDR_WIDTH-1:8])
+						rd_addr_hazard = 1'b1;
+				end
+			end
+		end
+	end
+
+	// Symmetric forward-declaration for the read pipeline.
+	logic rd_slot_occupied [0:1];
+	always_comb begin
+		for (int s = 0; s < 2; s++) begin
+			rd_slot_occupied[s] = !rf_slot_free_rd[s] ||
+								  (rf_alloc_rd && (rf_alloc_slot_rd == logic'(s)));
+		end
+	end
+
+	always_comb begin
+		// wr_addr_hazard: a live read slot covers the same cache line as the
+		// INCOMING write request (AW FIFO head).
+		//
+		// Address source: when wr_state==ST_IDLE the write has not been
+		// allocated yet so wr_active_slot is stale. Use wr_req_fifo_out.awaddr
+		// (the AW FIFO head) for the comparison. Once write is past IDLE it is
+		// used only in the push arbiter where rf_req_out_wr[wr_active_slot]
+		// is valid.
+		//
+		// Used in TWO places:
+		//   1. wr_can_accept / wr_can_accept_next: blocks write from leaving
+		//      IDLE when a conflicting read is already in DISPATCH (FCFS rule).
+		//   2. Push arbiter: protects beat atomicity if a read LSB is in-flight.
+		wr_addr_hazard = 1'b0;
+		for (int s = 0; s < 2; s++) begin
+			if (rd_slot_occupied[s] && !rd_all_beats_pushed[s]) begin
+				logic [ADDR_WIDTH-1:0] wr_incoming_addr;
+				wr_incoming_addr = (wr_state == ST_IDLE)
+								   ? wr_req_fifo_out.awaddr
+								   : rf_req_out_wr[wr_active_slot].awaddr;
+				if (wr_incoming_addr[ADDR_WIDTH-1:8] ==
+					rf_req_out_rd[s].araddr[ADDR_WIDTH-1:8])
+					wr_addr_hazard = 1'b1;
+			end
+		end
+	end
+
+	/*=====================================================================*/
 	/*  Accept conditions                                                   */
 	/*=====================================================================*/
 
 	always_comb begin
-		// First request: FSM is in IDLE, alloc_ptr slot is free.
+		// Write first request: FSM is in IDLE, alloc_ptr slot is free.
+		//
+		// First-come-first-served priority:
+		//   - Read already in DISPATCH (arrived earlier): wr_addr_hazard==1,
+		//     write stays in IDLE until rd_all_beats_pushed clears the hazard.
+		//   - True simultaneous (both IDLE same cycle, colliding address):
+		//     rd_slot_occupied is 0 this cycle (read not yet allocated, and
+		//     rd_can_accept is already blocked by rd_addr_hazard seeing
+		//     wr_slot_occupied). wr_addr_hazard==0, write proceeds, read waits
+		//     next cycle. Write wins the tie by construction  correct because
+		//     both arrived the same cycle so either choice is valid.
+		//   - No collision: wr_addr_hazard==0, write proceeds freely.
 		wr_can_accept = (wr_state == ST_IDLE) &&
 						!wr_req_empty &&
 						!wr_data_empty &&
-						rf_slot_free_wr[wr_alloc_ptr] && !wr_addr_hazard ;
+						rf_slot_free_wr[wr_alloc_ptr] &&
+						!wr_addr_hazard;
 
-		// Second request: FSM is in WAIT_RESP, active slot's beats are all
-		// in the APB FIFO, and the alloc_ptr slot (the other one) is free.
-		// This allows pipelining: slot 0 collecting APB responses while
-		// slot 1 starts dispatching immediately.
+		// Write second request: FSM is in WAIT_RESP, active slot fully pushed,
+		// other slot free, and no conflicting read still pushing.
 		wr_can_accept_next = (wr_state == ST_WAIT_RESP) &&
 							 !wr_req_empty &&
 							 !wr_data_empty &&
 							 wr_all_beats_pushed[wr_active_slot] &&
-							 rf_slot_free_wr[wr_alloc_ptr];
+							 rf_slot_free_wr[wr_alloc_ptr] &&
+							 !wr_addr_hazard;
 
-		// Read equivalents
+		// Read first request: FSM is in IDLE, alloc_ptr slot is free, AND
+		// no live write slot covers the same cache line (rd_addr_hazard checks
+		// the FIFO-head address before allocation, so this prevents the read
+		// from ever entering DISPATCH while a conflicting write is in flight).
 		rd_can_accept = (rd_state == ST_IDLE) &&
-						!rd_req_empty && 
-						rf_slot_free_rd[rd_alloc_ptr];
+						!rd_req_empty &&
+						rf_slot_free_rd[rd_alloc_ptr] &&
+						!rd_addr_hazard;
 
+		// Read second request: FSM is in WAIT_RESP, active slot done pushing,
+		// other slot free - and no conflicting write in flight.
 		rd_can_accept_next = (rd_state == ST_WAIT_RESP) &&
 							 !rd_req_empty &&
 							 rd_all_beats_pushed[rd_active_slot] &&
-							 rf_slot_free_rd[rd_alloc_ptr] && !rd_addr_hazard;
-	end
-
-	/*=====================================================================*/
-	/*  Hazard check  suppress read APB pushes while any write slot has    */
-	/*  beats not yet fully in the APB req FIFO.                           */
-	/*                                                                     */
-	/*  Without this, a read sub-txn can enter the APB pipeline before    */
-	/*  the write's sub-txns, causing interleaved req/resp ordering that   */
-	/*  the manager cannot reconcile (write responses arrive while FSM is  */
-	/*  still in ST_DISPATCH, wr_all_beats_pushed=0, so apb_resp_pop      */
-	/*  never fires ? deadlock).                                           */
-	/*                                                                     */
-	/*  Used in push arbiter only; does NOT block read acceptance.         */
-	/*=====================================================================*/
-/***********************************DONE HERE*************************************/
-//need to find better solution, what happens now is that the hazard is detected after both are in DISPATCH
-//which doesnt help us in stalling the latest one and they interrupt each other.
-	always_comb begin
-		rd_addr_hazard = 1'b0;
-		for (int s = 0; s < 2; s++) begin
-			if (rf_slot_free_wr[s] && !wr_all_beats_pushed[s] && 
-				(dis_rd_beat_addr[ADDR_WIDTH-1:8] == rf_req_out_wr[s].awaddr[ADDR_WIDTH-1:8]))
-					rd_addr_hazard = 1'b1;
-		end
-	end
-
-	always_comb begin
-		wr_addr_hazard = 1'b0;
-		for (int s = 0; s < 2; s++) begin
-			if (!rf_slot_free_rd[s] && !rd_all_beats_pushed[s] &&
-				(dis_wr_beat_addr[ADDR_WIDTH-1:8] == rf_req_out_rd[s].araddr[ADDR_WIDTH-1:8]))
-					wr_addr_hazard = 1'b1;
-		end
+							 rf_slot_free_rd[rd_alloc_ptr] &&
+							 !rd_addr_hazard;
 	end
 
 	/*=====================================================================*/
@@ -608,7 +686,7 @@ import struct_types::*;
 		.lsb_pslverr (wr_resp_lsb_err    [wr_completing_slot]),
 		.msb_prdata  (wr_resp_msb_data   [wr_completing_slot]),
 		.msb_pslverr (wr_resp_msb_err    [wr_completing_slot]),
-		.rdata       (asm_wr_rdata),
+		.rdata       (),                // unused  writes produce no read data
 		.rresp       (asm_wr_rresp),
 		.bresp       (asm_wr_bresp)
 	);
@@ -616,10 +694,10 @@ import struct_types::*;
 	axi_resp_builder u_axi_resp_builder_wr (
 		.transaction_id (rf_req_out_wr[wr_completing_slot].awid),
 		.is_last        (wr_is_last[wr_completing_slot]),
-		.rdata          (asm_wr_rdata),
+		.rdata          ('0),
 		.rresp          (asm_wr_rresp),
 		.bresp          (wr_burst_err[wr_completing_slot] ? 2'b10 : asm_wr_bresp),
-		.rd_data        (axi_rd_data_assembled),    // unused on write path
+		.rd_data        (),             // unused on write path
 		.wr_resp        (axi_wr_resp_assembled)
 	);
 
@@ -657,7 +735,7 @@ import struct_types::*;
 		.msb_pslverr (rd_resp_msb_err    [rd_completing_slot]),
 		.rdata       (asm_rd_rdata),
 		.rresp       (asm_rd_rresp),
-		.bresp       (asm_rd_bresp)
+		.bresp       ()                 // unused  reads produce no write response
 	);
 
 	axi_resp_builder u_axi_resp_builder_rd (
@@ -665,9 +743,9 @@ import struct_types::*;
 		.is_last        (rd_is_last[rd_completing_slot]),
 		.rdata          (asm_rd_rdata),
 		.rresp          (asm_rd_rresp),
-		.bresp          (asm_rd_bresp),
+		.bresp          ('0),
 		.rd_data        (axi_rd_resp_assembled),
-		.wr_resp        (axi_wr_resp_rd_unused)    // unused on read path
+		.wr_resp        ()              // unused on read path
 	);
 
 	/*=====================================================================*/
@@ -694,21 +772,22 @@ import struct_types::*;
 		.resp_ready_wr       (rf_resp_ready_wr),
 		.slot_free_wr        (rf_slot_free_wr),
 
-		// Read direction  req header still stored for beat_addr computation
+		// Read direction  req header stored for beat_addr computation;
+		// all response ports are unused (reads bypass the reg file entirely,
+		// going directly to rd_data_fifo).
 		.alloc_rd            (rf_alloc_rd),
 		.alloc_slot_rd       (rf_alloc_slot_rd),
 		.alloc_req_rd        (rf_alloc_req_rd),
 		.req_out_rd          (rf_req_out_rd),
-		// Response ports unused  reads bypass reg file, go direct to rd_data_fifo
 		.resp_rd_en          (1'b0),
 		.resp_slot_rd        (1'b0),
 		.resp_in_rd          ('0),
 		.resp_valid_set_rd   (1'b0),
 		.resp_valid_slot_rd  (1'b0),
 		.done_rd             (rf_done_rd),
-		.resp_out_rd         (rf_resp_out_rd),
-		.resp_id_out_rd      (rf_resp_id_out_rd),
-		.resp_ready_rd       (rf_resp_ready_rd),
+		.resp_out_rd         (),
+		.resp_id_out_rd      (),
+		.resp_ready_rd       (),
 		.slot_free_rd        (rf_slot_free_rd)
 	);
 
@@ -799,10 +878,20 @@ import struct_types::*;
 			end
 
 			// ---- Read pipeline (only if write did not push this cycle) ----
-			// Suppressed by rd_addr_hazard UNLESS the read has already pushed
-			// its LSB this beat  in that case MSB must follow atomically.
+			//
+			// A read push is allowed when ALL of the following hold:
+			//   1. The write pipeline did not push this cycle (apb_req_push_n==1).
+			//   2. The read FSM is in DISPATCH.
+			//   3. Either there is no address hazard (rd_addr_hazard==0), OR the
+			//      read beat is already in progress (LSB pushed, MSB still pending).
+			//      The in-progress exception is mandatory for correctness: once the
+			//      LSB is in the FIFO the MSB MUST follow in the next available
+			//      slot or the tag router will deadlock waiting for a pair that
+			//      never completes.  rd_addr_hazard is only checked for fresh beats
+			//      (where LSB has not yet been pushed).
 			if (apb_req_push_n &&
-				rd_state == ST_DISPATCH && rd_beat_in_progress) begin
+				rd_state == ST_DISPATCH &&
+				(!rd_addr_hazard || rd_beat_in_progress)) begin
 
 				if (!rd_req_lsb_pushed[rd_active_slot] && dis_rd_valid_lsb) begin
 					apb_req_push_n  = 1'b0;
@@ -906,12 +995,6 @@ import struct_types::*;
 		rf_resp_valid_set_wr   = 1'b0;
 		rf_resp_valid_slot_wr  = wr_completing_slot;
 
-		rf_resp_rd_en          = 1'b0;
-		rf_resp_slot_rd        = rd_active_slot;
-		rf_resp_in_rd          = axi_rd_resp_assembled;
-		rf_resp_valid_set_rd   = 1'b0;
-		rf_resp_valid_slot_rd  = rd_active_slot;
-
 		if (wr_state == ST_WAIT_RESP &&
 			!rf_slot_free_wr[wr_completing_slot] &&
 			(wr_req_lsb_pending[wr_completing_slot] ||
@@ -921,10 +1004,8 @@ import struct_types::*;
 			if (wr_is_last[wr_completing_slot])
 				rf_resp_valid_set_wr = 1'b1;
 		end
-
-		// Read responses bypass the reg file entirely  driven directly to
-		// rd_data_fifo via rd_data_push_n / rd_data_fifo_in above.
-		// No reg file write for reads.
+		// Reads bypass the reg file: each beat is pushed directly to
+		// rd_data_fifo via rd_data_push_n / rd_data_fifo_in.
 	end
 
 	/*=====================================================================*/
@@ -1302,14 +1383,5 @@ import struct_types::*;
 			endcase
 		end
 	end
-
-	/*=====================================================================*/
-	/*  All-beats-pushed tracking                                          */
-	/*  Set when the last beat's last half is pushed to APB FIFO.         */
-	/*  Cleared when a new request is allocated into the same slot.        */
-	/*=====================================================================*/
-	// Note: wr_all_beats_pushed is set inside the DISPATCH always_ff above
-	// (when wr_is_last && both halves done).  The clear happens in IDLE and
-	// WAIT_RESP accept blocks above.  Same for rd_all_beats_pushed.
 
 endmodule

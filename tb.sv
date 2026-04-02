@@ -103,9 +103,13 @@
  *         Only the MSB APB sub-transaction is generated.
  *
  *  P1-5  Write strobe: LSB lanes only (wstrb=8'h0F, size=3)
- *         Verifies pstrb[3:0] non-zero and pstrb[7:4]=0 on the APB side.
+ *         Verifies disassembler suppresses MSB half (pstrb[7:4]=0 → not valid
+ *         for write).  Checks: exactly 1 APB sub-txn issued (apb_txn_cnt+1),
+ *         and pstrb captured during ACCESS phase equals 4'hF.
  *
  *  P1-6  Write strobe: MSB lanes only (wstrb=8'hF0, size=3)
+ *         Symmetric to P1-5: addr[2]=1 (0x4000_0004) → MSB half only.
+ *         Checks: 1 sub-txn, pstrb=4'hF on that txn.
  *
  *  P1-7  Max-length write burst (awlen=7 ? 8 beats, size=3)
  *         AW sent in parallel with all 8 W beats.  Checks BRESP=OKAY and
@@ -168,22 +172,25 @@
  *
  * PRIORITY 3  Flow control and robustness
  * ------------------------------------------
- *  P3-1  Write starvation / rd_priority
- *         One AR queued, then 5 writes issued in a fork.  Verifies that
- *         all 5 writes complete AND the read is not starved (both
- *         rd_priority mechanism and forward progress guaranteed).
+ *  P3-1  Write + read pipeline independence
+ *         One AR queued, then 5 serial writes issued concurrently.  Because
+ *         the write and read pipelines are fully independent FSMs (no
+ *         starvation counter exists in the RTL), the read FSM accepts the AR
+ *         and processes it independently of write activity.  Verifies all 5
+ *         writes and the 1 read complete OKAY with no timeout.
  *
- *  P3-2  rd_priority resets after read accept
- *         After P3-1, issues one write and one read concurrently.  Write
- *         should win the APB arbiter (no rd_priority active).  Both must
- *         complete OKAY.
+ *  P3-2  Concurrent write + read, distinct addresses
+ *         One write and one read issued simultaneously.  No hazard (different
+ *         cache lines).  Write wins APB arbiter each cycle it pushes; read
+ *         uses idle cycles.  Both must complete OKAY.
  *
- *  P3-3  APB req FIFO back-pressure
- *         4 serial writes with pready_delay=3.  Each write queues 2 APB
- *         sub-requests; the slave is slow enough that the FIFO always has
- *         pending entries during processing.  Serial send (no fork) is
- *         required because axi_send_aw/axi_send_w drive shared signals and
- *         cannot run concurrently.  Verifies all 4 BRESP=OKAY.
+ *  P3-3  APB req FIFO back-pressure (2-slot batched writes)
+ *         The bridge has 2 write slots; a 3rd AW stalls on awready until a
+ *         slot frees (BRESP collected).  Strategy: send 2 AW+W pairs upfront
+ *         with pready_delay=3 so both slots dispatch and their 4 APB sub-
+ *         requests pile up in the FIFO while the slave is slow.  Collect both
+ *         BRESPs (still slow), then repeat for writes 3 & 4.  Back-pressure
+ *         is active throughout all 4 writes.  All 4 BRESP=OKAY verified.
  *
  *  P3-4  Slow PREADY (multi-cycle ACCESS phase)
  *         pready_delay=5 applied to concurrent write + read.  Verifies the
@@ -555,26 +562,66 @@ import struct_types::*;
 		wait_idle();
 
 		/*---------------------------------------------------------------------*/
-		/* P1-5  Write strobe: LSB lanes only (wstrb=8'h0F)                   */
-		/* Verifies pstrb[3:0] set, pstrb[7:4] zero on APB side              */
+		/* P1-5  Write strobe: LSB lanes only (wstrb=8'h0F, size=3)          */
+		/* wstrb[3:0]=4'hF → lsb_pstrb=4'hF, wstrb[7:4]=4'h0 → msb invalid  */
+		/* Disassembler suppresses MSB half (pstrb==0 → not valid for write). */
+		/* Verified: exactly 1 APB sub-transaction, pstrb=4'hF on that txn.  */
 		/*---------------------------------------------------------------------*/
 		begin
-			logic [1:0] bresp;
-			axi_write(32'h4000_0000, 32'hA5, 64'hFFFF_FFFF_DEAD_BEEF,
-					  8'h0F, 3'd3, bresp);
-			check("P1-5 strobe LSB-only BRESP=OKAY", bresp === 2'b00);
+			logic [1:0]  bresp;
+			logic [3:0]  captured_pstrb;
+			int          base_cnt;
+			base_cnt = apb_txn_cnt;
+
+			// Arm a one-cycle pstrb capture on the next APB ACCESS handshake.
+			// We use a fork so the write and the monitor run in parallel.
+			fork
+				axi_write(32'h4000_0000, 32'hA5, 64'hFFFF_FFFF_DEAD_BEEF,
+						  8'h0F, 3'd3, bresp);
+				begin
+					// Wait for the ACCESS phase (psel & penable) of the one APB txn.
+					@(posedge clk);
+					while (!(apb.psel && apb.penable)) @(posedge clk);
+					captured_pstrb = apb.pstrb;
+				end
+			join
+
+			check("P1-5 strobe LSB-only BRESP=OKAY",          bresp === 2'b00);
+			check("P1-5 exactly 1 APB sub-txn (MSB suppressed)",
+				  (apb_txn_cnt - base_cnt) === 1);
+			check("P1-5 APB pstrb = 4'hF (LSB lanes set)",
+				  captured_pstrb === 4'hF);
 		end
 
 		wait_idle();
 
 		/*---------------------------------------------------------------------*/
-		/* P1-6  Write strobe: MSB lanes only (wstrb=8'hF0)                   */
+		/* P1-6  Write strobe: MSB lanes only (wstrb=8'hF0, size=3)          */
+		/* wstrb[7:4]=4'hF → msb_pstrb=4'hF, wstrb[3:0]=4'h0 → lsb invalid. */
+		/* Disassembler suppresses LSB half.                                  */
+		/* Verified: exactly 1 APB sub-transaction, pstrb=4'hF on that txn.  */
 		/*---------------------------------------------------------------------*/
 		begin
-			logic [1:0] bresp;
-			axi_write(32'h4000_0000, 32'hA6, 64'hDEAD_BEEF_FFFF_FFFF,
-					  8'hF0, 3'd3, bresp);
-			check("P1-6 strobe MSB-only BRESP=OKAY", bresp === 2'b00);
+			logic [1:0]  bresp;
+			logic [3:0]  captured_pstrb;
+			int          base_cnt;
+			base_cnt = apb_txn_cnt;
+
+			fork
+				axi_write(32'h4100_0004, 32'hA6, 64'hFEAD_BEEF_FFFF_FFFF,
+						  8'hF0, 3'd3, bresp);
+				begin
+					@(posedge clk);
+					while (!(apb.psel && apb.penable)) @(posedge clk);
+					captured_pstrb = apb.pstrb;
+				end
+			join
+
+			check("P1-6 strobe MSB-only BRESP=OKAY",          bresp === 2'b00);
+			check("P1-6 exactly 1 APB sub-txn (LSB suppressed)",
+				  (apb_txn_cnt - base_cnt) === 1);
+			check("P1-6 APB pstrb = 4'hF (MSB lanes set)",
+				  captured_pstrb === 4'hF);
 		end
 
 		wait_idle();
@@ -966,13 +1013,25 @@ import struct_types::*;
 		/*=====================================================================*/
 
 		/*---------------------------------------------------------------------*/
-		/* P3-1  Write starvation: 4 writes while read pending ? rd_priority  */
-		/* Queue 1 read + 5 writes. The first 4 writes should be accepted     */
-		/* normally (WR_STARVE_THRESH=4). After that rd_priority should latch  */
-		/* and the read wins before write #5.                                 */
-		/* We verify indirectly by checking that all 5 writes and 1 read      */
-		/* complete correctly  if rd_priority failed, the read would starve  */
-		/* and the read task would time out.                                  */
+		/* P3-1  Write + read pipeline independence: no cross-starvation      */
+		/*                                                                     */
+		/* The write and read pipelines are fully independent FSMs sharing    */
+		/* only the APB arbiter (writes win per cycle when both want to push)  */
+		/* and the hazard gate (FCFS on same cache line, not applicable here   */
+		/* since all addresses are distinct).  There is NO starvation counter  */
+		/* or rd_priority latch in the RTL.                                    */
+		/*                                                                     */
+		/* What this test verifies:                                            */
+		/*   - A read queued in rd_req_fifo is accepted by the read FSM as    */
+		/*     soon as the read FSM is in ST_IDLE and its slot is free,        */
+		/*     regardless of how many writes are in-flight on the write side.  */
+		/*   - 5 serial writes all complete BRESP=OKAY.                       */
+		/*   - The 1 read completes RRESP=OKAY concurrently with those writes. */
+		/*                                                                     */
+		/* The read is sent to 0x2000_0000 and writes to 0x3000_0000+i*8, so  */
+		/* there is no cache-line collision and no hazard gate applies.        */
+		/* The read FSM can accept the AR independently while the write FSM    */
+		/* processes its queue; both pipelines make forward progress together. */
 		/*---------------------------------------------------------------------*/
 		begin
 			logic [1:0]  bresp;
@@ -981,7 +1040,9 @@ import struct_types::*;
 			int           wr_done, rd_done;
 			wr_done = 0; rd_done = 0;
 
-			// Send read request first (it should eventually be forced through)
+			// Send the read request first so it sits in rd_req_fifo.
+			// The read FSM will accept it as soon as it is in ST_IDLE
+			// (independent of write pipeline activity).
 			@(negedge clk);
 			axi.arvalid = 1; axi.araddr = 32'h2000_0000;
 			axi.arid = 32'hFF; axi.arlen = 8'd0; axi.arsize = 3'd3;
@@ -989,7 +1050,10 @@ import struct_types::*;
 			while (!axi.arready) @(posedge clk);
 			@(negedge clk); axi.arvalid = 0;
 
-			// Send 5 writes immediately  they should win the first 4
+			// Run 5 serial writes concurrently with the read collection.
+			// axi_write blocks per-write so writes are sequential on the
+			// AXI master side, but the read pipeline runs independently
+			// and will complete whenever its APB sub-transactions finish.
 			fork
 				begin
 					for (int i = 0; i < 5; i++) begin
@@ -999,72 +1063,97 @@ import struct_types::*;
 					end
 				end
 				begin
-					// Collect the read response; it must arrive before the 5th write
 					logic [31:0] rid_unused;
 					logic        rlast_unused;
 					axi_collect_r(rid_unused, rdata, rresp, rlast_unused);
 					if (rresp === 2'b00) rd_done++;
 				end
 			join
-			check("P3-1 all 5 writes completed", wr_done === 5);
-			check("P3-1 read was not starved",   rd_done === 1);
+			check("P3-1 all 5 writes completed OKAY", wr_done === 5);
+			check("P3-1 read completed OKAY (pipeline independent of writes)", rd_done === 1);
 		end
 
 		wait_idle();
 
 		/*---------------------------------------------------------------------*/
-		/* P3-2  rd_priority clears on read accept, wr wins next cycle        */
+		/* P3-2  Concurrent write + read, distinct addresses, both complete    */
+		/* Verifies the write and read pipelines can both be active at once    */
+		/* with no hazard (addresses differ in cache line) and both return     */
+		/* OKAY responses.  Write wins the APB arbiter each cycle it pushes;   */
+		/* read progresses in cycles where write is idle.                      */
 		/*---------------------------------------------------------------------*/
 		begin
-			// After P3-1 the counter is reset. Issue one read then one write:
-			// write should win immediately (no rd_priority active).
 			logic [1:0]  bresp, rresp;
 			logic [63:0] rdata;
 			fork
 				axi_write(32'h4000_0000, 32'h41, 64'hBEEF, 8'hFF, 3'd3, bresp);
 				axi_read(32'h4100_0000, 32'h42, 3'd3, rdata, rresp);
 			join
-			check("P3-2 write after priority reset OKAY", bresp === 2'b00);
-			check("P3-2 read after priority reset OKAY",  rresp === 2'b00);
+			check("P3-2 concurrent write OKAY", bresp === 2'b00);
+			check("P3-2 concurrent read OKAY",  rresp === 2'b00);
 		end
 
 		wait_idle();
 
 		/*---------------------------------------------------------------------*/
 		/* P3-3  APB req FIFO back-pressure                                   */
-		/* FIX #5: The old test issued 8 sequential (blocking) axi_write      */
-		/* calls with pready_delay=3.  axi_write blocks until BRESP arrives,  */
-		/* so only one transaction is in-flight at a time  this never tests  */
-		/* actual back-pressure.                                               */
 		/*                                                                     */
-		/* Fix: fire all 4 writes in parallel forks so that write slots and   */
-		/* the APB FIFO fill up concurrently.  pready_delay=3 ensures the APB */
-		/* slave is slower than the manager, causing the req FIFO to fill.    */
-		/* Each fork collects its own BRESP so we can verify all completed.   */
+		/* The bridge has exactly 2 write slots. awready is gated on          */
+		/* slot_free_wr, so the 3rd AW will stall until a slot is freed by a  */
+		/* BRESP handshake — sending more than 2 AW+W pairs before collecting */
+		/* any BRESP deadlocks on the 3rd axi_send_aw.                        */
+		/*                                                                     */
+		/* Correct strategy: send the first 2 AW+W pairs while pready_delay   */
+		/* is already high, so both slots enter ST_DISPATCH and their 4 APB   */
+		/* sub-requests start accumulating in the FIFO while the slow slave   */
+		/* is still processing sub-txn 0.  The APB req FIFO fills with        */
+		/* back-logged entries, exercising the apb_req_full stall path.       */
+		/* Then collect both BRESPs; with pready_delay still high these take  */
+		/* many cycles, keeping the FIFO under pressure throughout.  Finally  */
+		/* send and collect writes 3 and 4 (slots are now free).              */
+		/*                                                                     */
+		/* pready_delay is kept high for all 4 writes so every APB sub-txn   */
+		/* takes multiple cycles and the FIFO always has pending entries.     */
+		/* All 4 BRESP=OKAY checked at the end.                               */
 		/*---------------------------------------------------------------------*/
 		begin
-			int ok_cnt;
+			logic [31:0] bid;
+			logic [1:0]  br;
+			int          ok_cnt;
 			ok_cnt = 0;
 
-			// Slow down the APB slave so the APB req FIFO fills up between
-			// the manager pushing requests and the master consuming them.
-			// We don't need concurrent writes to test this  serial writes
-			// with pready_delay is sufficient: each write queues its 2 APB
-			// sub-requests into the FIFO while the previous sub-transaction
-			// is still in its multi-cycle ACCESS phase.
+			// Slow APB slave first — sub-txns will pile up in the req FIFO.
 			apb_pready_delay = 3;
 
-			for (int i = 0; i < 4; i++) begin
-				logic [1:0]  br;
-				logic [31:0] bd;
-				axi_send_aw(32'h5000_0000 + i*8, 32'h50 + i, 8'd0, 3'd3);
-				axi_send_w(64'hCC00_0000_0000_0000 + i, 8'hFF, 1'b1);
-				axi_collect_b(bd, br);
-				if (br === 2'b00) ok_cnt++;
-			end
+			// Batch 1: fill both slots (writes 0 and 1 in-flight simultaneously).
+			// axi_send_aw/axi_send_w are sequential per write (shared signals),
+			// but no BRESP is collected here so both are in-flight at APB level.
+			axi_send_aw(32'h5000_0000, 32'h50, 8'd0, 3'd3);
+			axi_send_w(64'hCC00_0000_0000_0000, 8'hFF, 1'b1);
+			axi_send_aw(32'h5000_0008, 32'h51, 8'd0, 3'd3);
+			axi_send_w(64'hCC00_0000_0000_0001, 8'hFF, 1'b1);
+
+			// Collect batch 1 — slots free up while slave is still slow,
+			// keeping back-pressure active throughout.
+			// NOTE: apb_pready_delay is a global counter decremented by the
+			// always block on every ACCESS cycle.  After 4 sub-txns it has
+			// counted down from 3 to 0 and stays there.  Re-arm it for batch 2
+			// so the slave is slow again when the next sub-txns arrive.
+			axi_collect_b(bid, br); if (br === 2'b00) ok_cnt++;
+			axi_collect_b(bid, br); if (br === 2'b00) ok_cnt++;
+
+			// Batch 2: re-arm delay, then fill both slots again.
+			apb_pready_delay = 3;
+			axi_send_aw(32'h5000_0010, 32'h52, 8'd0, 3'd3);
+			axi_send_w(64'hCC00_0000_0000_0002, 8'hFF, 1'b1);
+			axi_send_aw(32'h5000_0018, 32'h53, 8'd0, 3'd3);
+			axi_send_w(64'hCC00_0000_0000_0003, 8'hFF, 1'b1);
+
+			axi_collect_b(bid, br); if (br === 2'b00) ok_cnt++;
+			axi_collect_b(bid, br); if (br === 2'b00) ok_cnt++;
 
 			apb_pready_delay = 0;
-			check("P3-3 back-pressure: all 4 writes completed", ok_cnt === 4);
+			check("P3-3 back-pressure: all 4 writes completed OKAY", ok_cnt === 4);
 		end
 
 		wait_idle();
@@ -1263,8 +1352,12 @@ import struct_types::*;
 					axi_send_ar(32'hCC00_0000, 32'hCD, 8'd0, 3'd3);
 				end
 			join
-			apb_pready_delay = 0;
 			// Collect write BRESP first.  bready is driven by axi_collect_b.
+			// Do NOT reset apb_pready_delay yet — it is being decremented by the
+			// always block on active APB sub-txns.  Resetting it mid-flight races
+			// with the always block's blocking = decrement and can corrupt the
+			// counter (e.g. drive it negative), causing pready to stall and
+			// apb_txn_cnt to be undercounted.  Reset only after all responses done.
 			axi_collect_b(bid, bresp);
 			after_wr_cnt = apb_txn_cnt;
 
@@ -1274,6 +1367,7 @@ import struct_types::*;
 
 			axi_collect_r(rid_tmp, rdata, rresp, rlast_tmp);
 			final_cnt = apb_txn_cnt;
+			apb_pready_delay = 0; // safe to reset now: all APB activity done
 
 			check("P4-3 write APB sub-txns precede read (=8 by BRESP time)",
 				  (after_wr_cnt - base_cnt) >= 8);
@@ -1320,8 +1414,8 @@ import struct_types::*;
 					axi_send_ar(32'hEE00_0000, 32'hDB, 8'd1, 3'd3);
 				end
 			join
-			apb_pready_delay = 0;
-			// Collect write BRESP first.
+			// Do NOT reset apb_pready_delay here — same race risk as P4-3.
+			// Reset after all responses are collected.
 			axi_collect_b(bid, bresp);
 			after_wr_cnt = apb_txn_cnt;
 
@@ -1350,6 +1444,7 @@ import struct_types::*;
 			end
 			axi.rready = 0;
 			final_cnt = apb_txn_cnt;
+			apb_pready_delay = 0; // safe to reset now: all APB activity done
 
 			check("P4-4 write APB sub-txns precede read (=8 by BRESP time)",
 				  (after_wr_cnt - base_cnt) >= 8);
@@ -1482,7 +1577,11 @@ import struct_types::*;
             logic [31:0] first_apb_addr;
             int          rd_ok;
             rd_ok = 0;
+            first_apb_addr = '0;
 
+            // Run the AXI submissions AND the psel monitor together so the
+            // monitor is armed before the very first APB transaction starts.
+            // After the fork the first_apb_addr is already captured.
             fork
                 begin
                     axi_send_aw(32'hCC10_0000, 32'hF3, 8'd0, 3'd3);
@@ -1492,12 +1591,16 @@ import struct_types::*;
                     @(posedge clk); // one cycle later so write is in flight first
                     axi_send_ar(32'hDD10_0000, 32'hF4, 8'd3, 3'd3);
                 end
+                begin
+                    // Capture paddr on the very first psel rising edge.
+                    // This thread runs in parallel with the AXI submissions,
+                    // so it is guaranteed to see the first edge before the
+                    // fork/join returns.
+                    @(posedge apb.psel);
+                    @(posedge clk); // settle through SETUP into ACCESS phase
+                    first_apb_addr = apb.paddr;
+                end
             join
-
-            /* Sample paddr on the very first psel edge — must be the write's addr */
-            @(posedge apb.psel);
-            @(posedge clk); // settle through SETUP phase
-            first_apb_addr = apb.paddr;
 
             check("P2-2M first APB addr belongs to write slot",
                   (first_apb_addr === 32'hCC10_0000 ||
@@ -1578,8 +1681,8 @@ import struct_types::*;
                     axi_send_ar(32'hEE10_0000, 32'hF6, 8'd3, 3'd3);
                 end
             join
-			apb_pready_delay = 0;
             /* Collect write BRESP first — this also serialises the ordering check */
+            /* Do NOT reset apb_pready_delay before collecting — same race as P4-3 */
             axi_collect_b(bid, bresp);
             after_wr_cnt = apb_txn_cnt;
 
@@ -1614,6 +1717,7 @@ import struct_types::*;
             end
             axi.rready = 0;
             final_cnt = apb_txn_cnt;
+            apb_pready_delay = 0; // safe to reset now: all APB activity done
 
             check("P4-3M write APB sub-txns precede read (>=8 by BRESP time)",
                   (after_wr_cnt - base_cnt) >= 8);

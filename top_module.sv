@@ -107,7 +107,7 @@ import struct_types::*;
 
     DW_fifo_s1_sf #(
         .width ($bits(axi_wr_data)),
-        .depth (FIFO_DEPTH)
+        .depth (FIFO_DEPTH*MAX_LEN)
     ) axi_wr_data_queue (
         .clk        (clk),
         .rst_n      (rst_n),
@@ -121,7 +121,7 @@ import struct_types::*;
 
     DW_fifo_s1_sf #(
         .width ($bits(axi_wr_resp)),
-        .depth (FIFO_DEPTH)
+        .depth (FIFO_DEPTH*MAX_LEN) //not to cause waiting at this point
     ) axi_wr_resp_queue (
         .clk        (clk),
         .rst_n      (rst_n),
@@ -169,7 +169,7 @@ import struct_types::*;
 
     DW_fifo_s1_sf #(
         .width ($bits(axi_rd_data)),
-        .depth (FIFO_DEPTH)
+        .depth (FIFO_DEPTH*MAX_LEN)
     ) axi_rd_data_queue (
         .clk        (clk),
         .rst_n      (rst_n),
@@ -191,7 +191,7 @@ import struct_types::*;
 
     DW_fifo_s1_sf #(
         .width ($bits(apb_struct)),
-        .depth (FIFO_DEPTH*2)
+        .depth (FIFO_DEPTH*MAX_LEN*2) //each AXI transaction is translated to 2 APB transactions
     ) apb_req_queue (
         .clk        (clk),
         .rst_n      (rst_n),
@@ -205,7 +205,7 @@ import struct_types::*;
 
     DW_fifo_s1_sf #(
         .width ($bits(apb_tag_t)),      // 2 bits: {slot, is_msb}
-        .depth (FIFO_DEPTH*2)                     // must match apb_req_queue depth
+        .depth (FIFO_DEPTH*MAX_LEN*2)                     // must match apb_req_queue depth
     ) apb_tag_queue (
         .clk        (clk),
         .rst_n      (rst_n),
@@ -235,7 +235,7 @@ import struct_types::*;
 
     DW_fifo_s1_sf #(
         .width ($bits(apb_struct)),
-        .depth (FIFO_DEPTH*2)
+        .depth (FIFO_DEPTH*MAX_LEN*2)
     ) apb_resp_queue (
         .clk        (clk),
         .rst_n      (rst_n),

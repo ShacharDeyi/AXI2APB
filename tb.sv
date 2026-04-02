@@ -1598,6 +1598,96 @@ import struct_types::*;
         wait_idle();
 
         /*-------------------------------------------------------------------*/
+        /* P2-2M  Write priority in APB arbiter with concurrent multi-beat   */
+        /*        read  (multi-beat variant of P2-2)                         */
+        /*                                                                   */
+        /* A single-beat write and a 4-beat read (arlen=3) are submitted     */
+        /* simultaneously.  Per the spec, the write pipeline wins the APB    */
+        /* arbiter every cycle it has pending sub-requests.                  */
+        /*                                                                   */
+        /* The write's 2 APB sub-requests must appear before any read        */
+        /* sub-request.  This is verified by capturing paddr on the first    */
+        /* posedge of psel (edge-triggered, same technique as P2-2) and      */
+        /* confirming it matches the write's base address.                   */
+        /*                                                                   */
+        /* After the first psel edge, both responses are drained:            */
+        /*   - Write BRESP=OKAY, bid matches awid.                           */
+        /*   - All 4 read beats RRESP=OKAY with correct rdata.              */
+        /*-------------------------------------------------------------------*/
+        begin
+            logic [31:0] bid;
+            logic [1:0]  bresp;
+            logic [31:0] first_apb_addr;
+            int          rd_ok;
+            rd_ok = 0;
+            first_apb_addr = '0;
+
+            // Run the AXI submissions AND the psel monitor together so the
+            // monitor is armed before the very first APB transaction starts.
+            // After the fork the first_apb_addr is already captured.
+            fork
+                begin
+                    axi_send_aw(32'hCC10_0000, 32'hF3, 8'd0, 3'd3);
+                    axi_send_w(64'hF300_0000_DEAD_BEEF, 8'hFF, 1'b1);
+                end
+                begin
+                    // Stall the AR until the write's first APB SETUP phase is
+                    // visible (psel rising edge).  This guarantees the write
+                    // sub-requests are already queued in the APB arbiter before
+                    // the read disassembler can compete, so the write wins
+                    // arbitration on every cycle it has a pending request.
+                    @(negedge axi.awvalid);
+                    axi_send_ar(32'hDD10_0000, 32'hF4, 8'd3, 3'd3);
+                end
+                begin
+                    // Capture paddr on the very first psel rising edge.
+                    // This thread runs in parallel with the AXI submissions,
+                    // so it is guaranteed to see the first edge before the
+                    // fork/join returns.
+                    @(posedge apb.psel);
+                    @(posedge clk); // settle through SETUP into ACCESS phase
+                    first_apb_addr = apb.paddr;
+                end
+            join
+
+            check("P2-2M first APB addr belongs to write slot",
+                  (first_apb_addr === 32'hCC10_0000 ||
+                   first_apb_addr === 32'hCC10_0004));
+
+            /* Collect write BRESP then drain all read beats */
+            axi_collect_b(bid, bresp);
+            check("P2-2M write BRESP=OKAY", bresp === 2'b00);
+            check("P2-2M bid matches awid", bid   === 32'hF3);
+
+            @(negedge clk); axi.rready = 1;
+            for (int b = 0; b < 4; b++) begin
+                logic [31:0] beat_lsb_addr, beat_msb_addr;
+                logic [63:0] expected_rdata, got_rdata;
+                logic [1:0]  got_rresp;
+
+                beat_lsb_addr  = 32'hDD10_0000 + b * 8;
+                beat_msb_addr  = beat_lsb_addr + 4;
+                expected_rdata = {~beat_msb_addr, ~beat_lsb_addr};
+
+                @(posedge clk);
+                while (!axi.rvalid) @(posedge clk);
+                got_rdata = axi.rdata;
+                got_rresp = axi.rresp;
+                @(negedge clk);
+
+                if (got_rresp === 2'b00) rd_ok++;
+                check($sformatf("P2-2M read beat %0d RRESP=OKAY", b),
+                      got_rresp === 2'b00);
+                check($sformatf("P2-2M read beat %0d rdata correct", b),
+                      got_rdata === expected_rdata);
+            end
+            axi.rready = 0;
+            check("P2-2M all 4 read beats RRESP=OKAY", rd_ok === 4);
+        end
+
+        wait_idle();
+
+        /*-------------------------------------------------------------------*/
         /* P4-3M  Hazard detection: write + multi-beat read to same address  */
         /*        (multi-beat variant of P4-3)                               */
         /*                                                                   */

@@ -472,21 +472,21 @@ import struct_types::*;
 									rf_slot_free_wr[s])
 								   ? wr_req_fifo_out.awaddr
 								   : rf_req_out_wr[s].awaddr;
-					if (rd_req_fifo_out.araddr[ADDR_WIDTH-1:8] ==
-						wr_slot_addr[ADDR_WIDTH-1:8])
+					if (rd_req_fifo_out.araddr[ADDR_WIDTH-1:6] ==
+						wr_slot_addr[ADDR_WIDTH-1:6])
 						rd_addr_hazard = 1'b1;
 				end
 				// Post-allocation check (rd FSM in DISPATCH or WAIT_RESP):
 				// The read is already allocated; compare against the stored base
 				// addresses in the register file.
 				if (rd_state != ST_IDLE) begin
-					if (rf_req_out_rd[rd_active_slot].araddr[ADDR_WIDTH-1:8] ==
-						rf_req_out_wr[s].awaddr[ADDR_WIDTH-1:8])
+					if (rf_req_out_rd[rd_active_slot].araddr[ADDR_WIDTH-1:6] ==
+						rf_req_out_wr[s].awaddr[ADDR_WIDTH-1:6])
 						rd_addr_hazard = 1'b1;
 					// Check the background read slot too if it is allocated.
 					if (!rf_slot_free_rd[~rd_active_slot] &&
-						rf_req_out_rd[~rd_active_slot].araddr[ADDR_WIDTH-1:8] ==
-						rf_req_out_wr[s].awaddr[ADDR_WIDTH-1:8])
+						rf_req_out_rd[~rd_active_slot].araddr[ADDR_WIDTH-1:6] ==
+						rf_req_out_wr[s].awaddr[ADDR_WIDTH-1:6])
 						rd_addr_hazard = 1'b1;
 				end
 			end
@@ -523,8 +523,8 @@ import struct_types::*;
 				wr_incoming_addr = (wr_state == ST_IDLE)
 								   ? wr_req_fifo_out.awaddr
 								   : rf_req_out_wr[wr_active_slot].awaddr;
-				if (wr_incoming_addr[ADDR_WIDTH-1:8] ==
-					rf_req_out_rd[s].araddr[ADDR_WIDTH-1:8])
+				if (wr_incoming_addr[ADDR_WIDTH-1:6] ==
+					rf_req_out_rd[s].araddr[ADDR_WIDTH-1:6])
 					wr_addr_hazard = 1'b1;
 			end
 		end

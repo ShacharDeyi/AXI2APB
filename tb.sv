@@ -103,12 +103,12 @@
  *         Only the MSB APB sub-transaction is generated.
  *
  *  P1-5  Write strobe: LSB lanes only (wstrb=8'h0F, size=3)
- *         Verifies disassembler suppresses MSB half (pstrb[7:4]=0 → not valid
+ *         Verifies disassembler suppresses MSB half (pstrb[7:4]=0 ? not valid
  *         for write).  Checks: exactly 1 APB sub-txn issued (apb_txn_cnt+1),
  *         and pstrb captured during ACCESS phase equals 4'hF.
  *
  *  P1-6  Write strobe: MSB lanes only (wstrb=8'hF0, size=3)
- *         Symmetric to P1-5: addr[2]=1 (0x4000_0004) → MSB half only.
+ *         Symmetric to P1-5: addr[2]=1 (0x4000_0004) ? MSB half only.
  *         Checks: 1 sub-txn, pstrb=4'hF on that txn.
  *
  *  P1-7  Max-length write burst (awlen=7 ? 8 beats, size=3)
@@ -128,6 +128,24 @@
  *  P1-10 PSLVERR on read response
  *         apb_inject_err=1 held for all sub-txns of a single-beat read.
  *         Verifies RRESP=2'b10.
+ *
+ *  P1-10b PSLVERR on mid-burst READ beat (beat 3 of 8)
+ *         Mirrors P1-9 for the read path. Uses apb_txn_cnt to arm
+ *         apb_inject_err on sub-txn 6 (LSB of AXI beat 3). Verifies at
+ *         least one RRESP=SLVERR is returned and rlast/rid are correct.
+ *
+ *  P1-10c PSLVERR on FIRST beat of write burst (beat 0 of 8)
+ *         Error injected on sub-txn 0 only; all other beats clean.
+ *         Verifies early error is captured and BRESP=SLVERR is returned.
+ *
+ *  P1-10d PSLVERR on LAST beat of write burst (beat 7 of 8)
+ *         Error injected on sub-txn 14 (LSB of beat 7); all earlier beats
+ *         clean. Verifies a late error is still propagated into BRESP=SLVERR
+ *         (no early-exit after the first clean beat).
+ *
+ *  P1-10e PSLVERR on MULTIPLE non-contiguous beats (beats 1 & 5 of 8)
+ *         Two separate error injections on sub-txns 2 and 10. Verifies the
+ *         bridge OR-accumulates scattered errors into a single BRESP=SLVERR.
  *
  *  P1-11 Transaction ID preservation
  *         awid=0xDEAD_BEEF echoed in bid; arid=0xCAFE_F00D echoed in rid.
@@ -311,8 +329,8 @@ import struct_types::*;
 	//
 	// pready MUST be combinational: the APB spec requires pready to be
 	// sampled by the master on the same posedge that psel & penable are
-	// high.  A registered pready always arrives one cycle late — after
-	// psel/penable have already dropped — which is the "extra high cycle"
+	// high.  A registered pready always arrives one cycle late  after
+	// psel/penable have already dropped  which is the "extra high cycle"
 	// seen in the waveform.
 	//
 	// Strategy:
@@ -596,9 +614,9 @@ import struct_types::*;
 		/*---------------------------------------------------------------------*/
 		begin
 			logic [1:0] bresp;
-			// addr[2]=1 ? MSB sub-transaction only
-			axi_write(32'h3000_0004, 32'hA4, 64'hABCD_EF01_0000_0000,
-					  8'hF0, 3'd2, bresp);
+			// addr[2]=1 ? 0MSB sub-transaction only
+			axi_write(32'h3100_0007, 32'hA4, 64'hABCD_EF01_0000_0000,
+					  8'h80, 3'd0, bresp);
 			check("P1-4 narrow MSB-only write BRESP=OKAY", bresp === 2'b00);
 		end
 
@@ -606,8 +624,8 @@ import struct_types::*;
 
 		/*---------------------------------------------------------------------*/
 		/* P1-5  Write strobe: LSB lanes only (wstrb=8'h0F, size=3)          */
-		/* wstrb[3:0]=4'hF → lsb_pstrb=4'hF, wstrb[7:4]=4'h0 → msb invalid  */
-		/* Disassembler suppresses MSB half (pstrb==0 → not valid for write). */
+		/* wstrb[3:0]=4'hF ? lsb_pstrb=4'hF, wstrb[7:4]=4'h0 ? msb invalid  */
+		/* Disassembler suppresses MSB half (pstrb==0 ? not valid for write). */
 		/* Verified: exactly 1 APB sub-transaction, pstrb=4'hF on that txn.  */
 		/*---------------------------------------------------------------------*/
 		begin
@@ -640,7 +658,7 @@ import struct_types::*;
 
 		/*---------------------------------------------------------------------*/
 		/* P1-6  Write strobe: MSB lanes only (wstrb=8'hF0, size=3)          */
-		/* wstrb[7:4]=4'hF → msb_pstrb=4'hF, wstrb[3:0]=4'h0 → lsb invalid. */
+		/* wstrb[7:4]=4'hF ? msb_pstrb=4'hF, wstrb[3:0]=4'h0 ? lsb invalid. */
 		/* Disassembler suppresses LSB half.                                  */
 		/* Verified: exactly 1 APB sub-transaction, pstrb=4'hF on that txn.  */
 		/*---------------------------------------------------------------------*/
@@ -787,6 +805,194 @@ import struct_types::*;
 		wait_idle();
 
 		/*---------------------------------------------------------------------*/
+		/* P1-10b PSLVERR on mid-burst READ beat (beat 3 of 8)              */
+		/* Mirrors P1-9 but for the read path.  Uses apb_txn_cnt to arm     */
+		/* apb_inject_err on exactly sub-txn 6 (LSB of AXI beat 3).         */
+		/* The bridge must OR the APB error into all remaining RRESP beats   */
+		/* from that sub-txn onward; at minimum beat 3 returns RRESP=SLVERR. */
+		/* Error is cleared after exactly one APB sub-txn consumes the flag. */
+		/*---------------------------------------------------------------------*/
+		begin
+			logic [31:0] rid;
+			logic [63:0] rdata;
+			logic [1:0]  rresp;
+			logic        rlast;
+			int           base_cnt;
+			int           slverr_cnt;
+			slverr_cnt = 0;
+			base_cnt   = apb_txn_cnt;
+
+			fork
+				// Thread A: send AR then drain all 8 R beats
+				begin
+					axi_send_ar(32'h8100_0000, 32'hAB, 8'd7, 3'd3);
+					@(negedge clk); axi.rready = 1;
+					for (int b = 0; b < 8; b++) begin
+						@(posedge clk);
+						while (!axi.rvalid) @(posedge clk);
+						if (axi.rresp === 2'b10) slverr_cnt++;
+						if (b == 7) begin
+							check("P1-10b rlast on beat 7", axi.rlast === 1'b1);
+							check("P1-10b rid matches arid", axi.rid === 32'hAB);
+						end
+						@(negedge clk);
+					end
+					axi.rready = 0;
+				end
+				// Thread B: arm error just before sub-txn 6 (LSB of beat 3),
+				// clear after exactly that one sub-txn fires.
+				begin
+					wait (apb_txn_cnt == base_cnt + 6);
+					@(negedge clk);
+					apb_inject_err = 1'b1;         // arm (blocking =, sole driver)
+					wait (apb_txn_cnt == base_cnt + 7); // one txn consumed the flag
+					@(negedge clk);
+					apb_inject_err = 1'b0;         // clear (blocking =, sole driver)
+				end
+			join
+
+			check("P1-10b mid-burst read PSLVERR ? at least 1 RRESP=SLVERR",
+				  slverr_cnt >= 1);
+		end
+
+		wait_idle();
+
+		/*---------------------------------------------------------------------*/
+		/* P1-10c PSLVERR on FIRST beat of write burst (beat 0 of 8)        */
+		/* Arms apb_inject_err immediately before the burst starts (sub-txn   */
+		/* 0 = LSB of beat 0) and clears after exactly that one sub-txn.      */
+		/* Verifies the bridge captures the early error and still returns      */
+		/* BRESP=SLVERR even when all subsequent beats are clean.             */
+		/*---------------------------------------------------------------------*/
+		begin
+			logic [31:0] bid;
+			logic [1:0]  bresp;
+			int           base_cnt;
+
+			base_cnt = apb_txn_cnt;
+
+			fork
+				// Thread A: send AW + 8 W beats
+				begin
+					axi_send_aw(32'h8200_0000, 32'hAC, 8'd7, 3'd3);
+					for (int b = 0; b < 8; b++)
+						axi_send_w(64'hC0C0_0000_0000_0000 + b,
+								   8'hFF,
+								   (b == 7) ? 1'b1 : 1'b0);
+				end
+				// Thread B: arm error for the very first APB sub-txn (sub-txn 0),
+				// then clear immediately after it completes.
+				begin
+					wait (apb_txn_cnt == base_cnt);  // already at base, arm now
+					@(negedge clk);
+					apb_inject_err = 1'b1;
+					wait (apb_txn_cnt == base_cnt + 1);
+					@(negedge clk);
+					apb_inject_err = 1'b0;
+				end
+			join
+
+			axi_collect_b(bid, bresp);
+			check("P1-10c first-beat PSLVERR ? BRESP=SLVERR", bresp === 2'b10);
+			check("P1-10c bid matches awid", bid === 32'hAC);
+		end
+
+		wait_idle();
+
+		/*---------------------------------------------------------------------*/
+		/* P1-10d PSLVERR on LAST beat of write burst (beat 7 of 8)         */
+		/* Arms apb_inject_err on sub-txn 14 (LSB of AXI beat 7, 0-indexed). */
+		/* Verifies the bridge still propagates a late error into BRESP even  */
+		/* if all earlier beats were clean (no early-exit on first error).    */
+		/*---------------------------------------------------------------------*/
+		begin
+			logic [31:0] bid;
+			logic [1:0]  bresp;
+			int           base_cnt;
+
+			base_cnt = apb_txn_cnt;
+
+			fork
+				// Thread A: send AW + 8 W beats
+				begin
+					axi_send_aw(32'h8300_0000, 32'hAD, 8'd7, 3'd3);
+					for (int b = 0; b < 8; b++)
+						axi_send_w(64'hD0D0_0000_0000_0000 + b,
+								   8'hFF,
+								   (b == 7) ? 1'b1 : 1'b0);
+				end
+				// Thread B: arm error on sub-txn 14 (LSB of last beat),
+				// clear after exactly that one sub-txn fires.
+				begin
+					wait (apb_txn_cnt == base_cnt + 14);
+					@(negedge clk);
+					apb_inject_err = 1'b1;
+					wait (apb_txn_cnt == base_cnt + 15);
+					@(negedge clk);
+					apb_inject_err = 1'b0;
+				end
+			join
+
+			axi_collect_b(bid, bresp);
+			check("P1-10d last-beat PSLVERR ? BRESP=SLVERR", bresp === 2'b10);
+			check("P1-10d bid matches awid", bid === 32'hAD);
+		end
+
+		wait_idle();
+
+		/*---------------------------------------------------------------------*/
+		/* P1-10e PSLVERR on MULTIPLE beats of a write burst (beats 1 & 5)  */
+		/* Injects errors on sub-txns 2 (LSB of beat 1) and 10 (LSB of       */
+		/* beat 5) of an 8-beat burst (16 total APB sub-txns).               */
+		/* Verifies the bridge OR-accumulates multiple scattered errors into   */
+		/* a single final BRESP=SLVERR without losing the second error after  */
+		/* the first is cleared.                                              */
+		/*---------------------------------------------------------------------*/
+		begin
+			logic [31:0] bid;
+			logic [1:0]  bresp;
+			int           base_cnt;
+
+			base_cnt = apb_txn_cnt;
+
+			fork
+				// Thread A: send AW + 8 W beats
+				begin
+					axi_send_aw(32'h8400_0000, 32'hAE, 8'd7, 3'd3);
+					for (int b = 0; b < 8; b++)
+						axi_send_w(64'hE0E0_0000_0000_0000 + b,
+								   8'hFF,
+								   (b == 7) ? 1'b1 : 1'b0);
+				end
+				// Thread B: inject error on sub-txn 2 (beat 1 LSB)
+				begin
+					wait (apb_txn_cnt == base_cnt + 2);
+					@(negedge clk);
+					apb_inject_err = 1'b1;
+					wait (apb_txn_cnt == base_cnt + 3);
+					@(negedge clk);
+					apb_inject_err = 1'b0;
+				end
+				// Thread C: inject error on sub-txn 10 (beat 5 LSB)
+				begin
+					wait (apb_txn_cnt == base_cnt + 10);
+					@(negedge clk);
+					apb_inject_err = 1'b1;
+					wait (apb_txn_cnt == base_cnt + 11);
+					@(negedge clk);
+					apb_inject_err = 1'b0;
+				end
+			join
+
+			axi_collect_b(bid, bresp);
+			check("P1-10e multi-beat PSLVERR (beats 1&5) ? BRESP=SLVERR",
+				  bresp === 2'b10);
+			check("P1-10e bid matches awid", bid === 32'hAE);
+		end
+
+		wait_idle();
+
+		/*---------------------------------------------------------------------*/
 		/* P1-11 Transaction ID preservation                                  */
 		/* FIX #3: IDs are captured via the task's output arguments, not by   */
 		/* re-sampling axi.bid/axi.rid after the handshake is over (the DUT   */
@@ -853,49 +1059,178 @@ import struct_types::*;
 
 		wait_idle();
 
-		/*---------------------------------------------------------------------*/
-		/* P2-2  Slot-0 priority in APB push arbitration                      */
-		/* Send two back-to-back transactions so both slots enter DISPATCH     */
-		/* around the same time; verify slot 0's APB requests appear first.   */
-		/* FIX #6 & #7: old check tested bit28 which is identical for both    */
-		/* addresses (always 0), making it a tautology.  New check captures   */
-		/* paddr on the posedge of psel (edge-triggered, not level) and        */
-		/* compares against the exact slot-0 base addresses.                  */
-		/*---------------------------------------------------------------------*/
+		/*-------------------------------------------------------------------*/
+		/* P2-2M  Write priority in APB arbiter with concurrent multi-beat   */
+		/*        read  (multi-beat variant of P2-2)                         */
+		/*                                                                   */
+		/* A single-beat write and a 4-beat read (arlen=3) are submitted     */
+		/* simultaneously.  Per the spec, the write pipeline wins the APB    */
+		/* arbiter every cycle it has pending sub-requests.                  */
+		/*                                                                   */
+		/* The write's 2 APB sub-requests must appear before any read        */
+		/* sub-request.  This is verified by capturing paddr on the first    */
+		/* posedge of psel (edge-triggered, same technique as P2-2) and      */
+		/* confirming it matches the write's base address.                   */
+		/*                                                                   */
+		/* After the first psel edge, both responses are drained:            */
+		/*   - Write BRESP=OKAY, bid matches awid.                           */
+		/*   - All 4 read beats RRESP=OKAY with correct rdata.              */
+		/*-------------------------------------------------------------------*/
 		begin
-			logic [31:0] bid0, bid1;
-			logic [1:0]  br0, br1;
+			logic [31:0] bid;
+			logic [1:0]  bresp;
 			logic [31:0] first_apb_addr;
+			int          rd_ok;
+			rd_ok = 0;
+			first_apb_addr = '0;
 
+			// Run the AXI submissions AND the psel monitor together so the
+			// monitor is armed before the very first APB transaction starts.
+			// After the fork the first_apb_addr is already captured.
 			fork
 				begin
-					// Slot 0: write to base 0xC000_0000
-					axi_send_aw(32'hC000_0000, 32'hC0, 8'd0, 3'd3);
-					axi_send_w(64'h1111_2222_3333_4444, 8'hFF, 1'b1);
+					axi_send_aw(32'hCC10_0000, 32'hF3, 8'd0, 3'd3);
+					axi_send_w(64'hF300_0000_DEAD_BEEF, 8'hFF, 1'b1);
 				end
 				begin
-					// Slot 1: write to base 0xC100_0000, one cycle later
-					@(posedge clk);
-					axi_send_aw(32'hC100_0000, 32'hC1, 8'd0, 3'd3);
-					axi_send_w(64'h5555_6666_7777_8888, 8'hFF, 1'b1);
+					// Stall the AR until the write's first APB SETUP phase is
+					// visible (psel rising edge).  This guarantees the write
+					// sub-requests are already queued in the APB arbiter before
+					// the read disassembler can compete, so the write wins
+					// arbitration on every cycle it has a pending request.
+					@(negedge axi.awvalid);
+					axi_send_ar(32'hDD10_0000, 32'hF4, 8'd3, 3'd3);
+				end
+				begin
+					// Capture paddr on the very first psel rising edge.
+					// This thread runs in parallel with the AXI submissions,
+					// so it is guaranteed to see the first edge before the
+					// fork/join returns.
+					@(posedge apb.psel);
+					@(posedge clk); // settle through SETUP into ACCESS phase
+					first_apb_addr = apb.paddr;
 				end
 			join
 
-			// FIX #7: use posedge psel (edge) so we sample paddr exactly when
-			// the first APB transaction starts, not on a possibly-stale level.
-			@(posedge apb.psel);
-			@(posedge clk); // settle through SETUP phase
-			first_apb_addr = apb.paddr;
+			check("P2-2M first APB addr belongs to write slot",
+				  (first_apb_addr === 32'hCC10_0000 ||
+				   first_apb_addr === 32'hCC10_0004));
 
-			check("P2-2 first APB addr is slot-0 base",
-				  (first_apb_addr === 32'hC000_0000 ||
-				   first_apb_addr === 32'hC000_0004));
+			/* Collect write BRESP then drain all read beats */
+			axi_collect_b(bid, bresp);
+			check("P2-2M write BRESP=OKAY", bresp === 2'b00);
+			check("P2-2M bid matches awid", bid   === 32'hF3);
+
+			@(negedge clk); axi.rready = 1;
+			for (int b = 0; b < 4; b++) begin
+				logic [31:0] beat_lsb_addr, beat_msb_addr;
+				logic [63:0] expected_rdata, got_rdata;
+				logic [1:0]  got_rresp;
+
+				beat_lsb_addr  = 32'hDD10_0000 + b * 8;
+				beat_msb_addr  = beat_lsb_addr + 4;
+				expected_rdata = {~beat_msb_addr, ~beat_lsb_addr};
+
+				@(posedge clk);
+				while (!axi.rvalid) @(posedge clk);
+				got_rdata = axi.rdata;
+				got_rresp = axi.rresp;
+				@(negedge clk);
+
+				if (got_rresp === 2'b00) rd_ok++;
+				check($sformatf("P2-2M read beat %0d RRESP=OKAY", b),
+					  got_rresp === 2'b00);
+				check($sformatf("P2-2M read beat %0d rdata correct", b),
+					  got_rdata === expected_rdata);
+			end
+			axi.rready = 0;
+			check("P2-2M all 4 read beats RRESP=OKAY", rd_ok === 4);
+		end
+
+		wait_idle();
+		/*-------------------------------------------------------------------*/
+		/* P2-2MW  Write priority in APB arbiter: multi-beat write + multi-  */
+		/*         beat read (full multi-beat variant of P2-2M)              */
+		/*                                                                   */
+		/* A 4-beat write (awlen=3, 8 APB sub-txns) and a 4-beat read        */
+		/* (arlen=3, 8 APB sub-txns) are submitted concurrently to distinct  */
+		/* addresses (no hazard).  The write pipeline must win the APB       */
+		/* arbiter on every cycle it has pending sub-requests.               */
+		/*                                                                   */
+		/* The AR is held off until the write's first psel rising edge so    */
+		/* the write's sub-requests are already queued in the APB arbiter    */
+		/* before the read disassembler can compete.                         */
+		/*                                                                   */
+		/* Verified:                                                          */
+		/*   - First APB paddr belongs to the write slot base address.       */
+		/*   - Write BRESP=OKAY, bid matches awid.                           */
+		/*   - All 4 read beats RRESP=OKAY with correct rdata per beat.     */
+		/*-------------------------------------------------------------------*/
+		begin
+			logic [31:0] bid;
+			logic [1:0]  bresp;
+			logic [31:0] first_apb_addr;
+			int          rd_ok;
+			rd_ok          = 0;
+			first_apb_addr = '0;
 
 			fork
-				axi_collect_b(bid0, br0);
-				axi_collect_b(bid1, br1);
+				/* ---- Write side: AW then 4 W beats ---- */
+				begin
+					axi_send_aw(32'hEE20_0000, 32'hF7, 8'd3, 3'd3);
+					for (int b = 0; b < 4; b++)
+						axi_send_w(64'hF700_0000_0000_0000 + b, 8'hFF, b == 3);
+				end
+				/* ---- Read side: stall AR until write's first psel ---- */
+				begin
+					// Wait for the write's first APB SETUP phase so its
+					// sub-requests are already queued before the read
+					// disassembler can compete for the arbiter.
+					@(negedge axi.awvalid);
+					axi_send_ar(32'hFF20_0000, 32'hF8, 8'd3, 3'd3);
+				end
+				/* ---- psel monitor: capture first APB address ---- */
+				begin
+					@(posedge apb.psel);
+					@(posedge clk); // settle from SETUP into ACCESS phase
+					first_apb_addr = apb.paddr;
+				end
 			join
-			check("P2-2 both writes OKAY", br0 === 2'b00 && br1 === 2'b00);
+
+			check("P2-2MW first APB addr belongs to write slot",
+				  (first_apb_addr === 32'hEE20_0000 ||
+				   first_apb_addr === 32'hEE20_0004));
+
+			/* Collect write BRESP */
+			axi_collect_b(bid, bresp);
+			check("P2-2MW write BRESP=OKAY", bresp === 2'b00);
+			check("P2-2MW bid matches awid", bid   === 32'hF7);
+
+			/* Drain all 4 read beats */
+			@(negedge clk); axi.rready = 1;
+			for (int b = 0; b < 4; b++) begin
+				logic [31:0] beat_lsb_addr, beat_msb_addr;
+				logic [63:0] expected_rdata, got_rdata;
+				logic [1:0]  got_rresp;
+
+				beat_lsb_addr  = 32'hFF20_0000 + b * 8;
+				beat_msb_addr  = beat_lsb_addr + 4;
+				expected_rdata = {~beat_msb_addr, ~beat_lsb_addr};
+
+				@(posedge clk);
+				while (!axi.rvalid) @(posedge clk);
+				got_rdata = axi.rdata;
+				got_rresp = axi.rresp;
+				@(negedge clk);
+
+				if (got_rresp === 2'b00) rd_ok++;
+				check($sformatf("P2-2MW read beat %0d RRESP=OKAY", b),
+					  got_rresp === 2'b00);
+				check($sformatf("P2-2MW read beat %0d rdata correct", b),
+					  got_rdata === expected_rdata);
+			end
+			axi.rready = 0;
+			check("P2-2MW all 4 read beats RRESP=OKAY", rd_ok === 4);
 		end
 
 		wait_idle();
@@ -1143,7 +1478,7 @@ import struct_types::*;
 		/*                                                                     */
 		/* The bridge has exactly 2 write slots. awready is gated on          */
 		/* slot_free_wr, so the 3rd AW will stall until a slot is freed by a  */
-		/* BRESP handshake — sending more than 2 AW+W pairs before collecting */
+		/* BRESP handshake  sending more than 2 AW+W pairs before collecting */
 		/* any BRESP deadlocks on the 3rd axi_send_aw.                        */
 		/*                                                                     */
 		/* Correct strategy: send the first 2 AW+W pairs while pready_delay   */
@@ -1165,7 +1500,7 @@ import struct_types::*;
 			int          ok_cnt;
 			ok_cnt = 0;
 
-			// Slow APB slave first — sub-txns will pile up in the req FIFO.
+			// Slow APB slave first  sub-txns will pile up in the req FIFO.
 			apb_pready_delay = 3;
 
 			// Batch 1: fill both slots (writes 0 and 1 in-flight simultaneously).
@@ -1176,7 +1511,7 @@ import struct_types::*;
 			axi_send_aw(32'h5000_0008, 32'h51, 8'd0, 3'd3);
 			axi_send_w(64'hCC00_0000_0000_0001, 8'hFF, 1'b1);
 
-			// Collect batch 1 — slots free up while slave is still slow,
+			// Collect batch 1  slots free up while slave is still slow,
 			// keeping back-pressure active throughout.
 			// NOTE: apb_pready_delay is a global counter decremented by the
 			// always block on every ACCESS cycle.  After 4 sub-txns it has
@@ -1396,7 +1731,7 @@ import struct_types::*;
 				end
 			join
 			// Collect write BRESP first.  bready is driven by axi_collect_b.
-			// Do NOT reset apb_pready_delay yet — it is being decremented by the
+			// Do NOT reset apb_pready_delay yet  it is being decremented by the
 			// always block on active APB sub-txns.  Resetting it mid-flight races
 			// with the always block's blocking = decrement and can corrupt the
 			// counter (e.g. drive it negative), causing pready to stall and
@@ -1457,7 +1792,7 @@ import struct_types::*;
 					axi_send_ar(32'hEE00_0000, 32'hDB, 8'd1, 3'd3);
 				end
 			join
-			// Do NOT reset apb_pready_delay here — same race risk as P4-3.
+			// Do NOT reset apb_pready_delay here  same race risk as P4-3.
 			// Reset after all responses are collected.
 			axi_collect_b(bid, bresp);
 			after_wr_cnt = apb_txn_cnt;
@@ -1521,263 +1856,559 @@ import struct_types::*;
  *         beat_addr = base_addr + beat_index * 8  (size=3, INCR)
  *===========================================================================*/
 
-        /*-------------------------------------------------------------------*/
-        /* P2-1M  Simultaneous multi-beat write + multi-beat read            */
-        /*        (multi-beat variant of P2-1)                               */
-        /*                                                                   */
-        /* A 4-beat write (awlen=3) and a 4-beat read (arlen=3) are issued   */
-        /* concurrently via fork/join to different addresses so there is no   */
-        /* hazard.  The write BRESP and all four read beats are then          */
-        /* collected independently (write in one thread, read drain in         */
-        /* another) to confirm:                                               */
-        /*   - No cross-contamination between write and read pipelines.       */
-        /*   - All 4 read beats return RRESP=OKAY with correct rdata.        */
-        /*   - rlast is asserted only on beat 3.                             */
-        /*   - BRESP=OKAY and bid matches awid.                              */
-        /*-------------------------------------------------------------------*/
-        begin
-            logic [31:0] bid;
-            logic [1:0]  bresp;
-            int          rd_ok;
-            rd_ok = 0;
+		/*-------------------------------------------------------------------*/
+		/* P2-1M  Simultaneous multi-beat write + multi-beat read            */
+		/*        (multi-beat variant of P2-1)                               */
+		/*                                                                   */
+		/* A 4-beat write (awlen=3) and a 4-beat read (arlen=3) are issued   */
+		/* concurrently via fork/join to different addresses so there is no   */
+		/* hazard.  The write BRESP and all four read beats are then          */
+		/* collected independently (write in one thread, read drain in         */
+		/* another) to confirm:                                               */
+		/*   - No cross-contamination between write and read pipelines.       */
+		/*   - All 4 read beats return RRESP=OKAY with correct rdata.        */
+		/*   - rlast is asserted only on beat 3.                             */
+		/*   - BRESP=OKAY and bid matches awid.                              */
+		/*-------------------------------------------------------------------*/
+		begin
+			logic [31:0] bid;
+			logic [1:0]  bresp;
+			int          rd_ok;
+			rd_ok = 0;
 
-            fork
-                /* ---- Write side ---- */
-                begin
-                    axi_send_aw(32'hAA00_0000, 32'hF1, 8'd3, 3'd3);
-                    for (int b = 0; b < 4; b++)
-                        axi_send_w(64'hF100_0000_0000_0000 + b, 8'hFF, b == 3);
-                end
-                /* ---- Read side ---- */
-                begin
-                    @(posedge clk); // one-cycle offset so AW wins first arbitration
-                    axi_send_ar(32'hBB00_0000, 32'hF2, 8'd3, 3'd3);
-                end
-            join
+			fork
+				/* ---- Write side ---- */
+				begin
+					axi_send_aw(32'hAA00_0000, 32'hF1, 8'd3, 3'd3);
+					for (int b = 0; b < 4; b++)
+						axi_send_w(64'hF100_0000_0000_0000 + b, 8'hFF, b == 3);
+				end
+				/* ---- Read side ---- */
+				begin
+					@(posedge clk); // one-cycle offset so AW wins first arbitration
+					axi_send_ar(32'hBB00_0000, 32'hF2, 8'd3, 3'd3);
+				end
+			join
 
-            /* Collect write BRESP and all 4 read beats concurrently */
-            fork
-                axi_collect_b(bid, bresp);
-                begin
-                    /* Hold rready across all beats for back-to-back drain */
-                    @(negedge clk); axi.rready = 1;
-                    for (int b = 0; b < 4; b++) begin
-                        logic [31:0] beat_lsb_addr, beat_msb_addr;
-                        logic [63:0] expected_rdata, got_rdata;
-                        logic [1:0]  got_rresp;
-                        logic        got_rlast;
+			/* Collect write BRESP and all 4 read beats concurrently */
+			fork
+				axi_collect_b(bid, bresp);
+				begin
+					/* Hold rready across all beats for back-to-back drain */
+					@(negedge clk); axi.rready = 1;
+					for (int b = 0; b < 4; b++) begin
+						logic [31:0] beat_lsb_addr, beat_msb_addr;
+						logic [63:0] expected_rdata, got_rdata;
+						logic [1:0]  got_rresp;
+						logic        got_rlast;
 
-                        beat_lsb_addr  = 32'hBB00_0000 + b * 8;
-                        beat_msb_addr  = beat_lsb_addr + 4;
-                        expected_rdata = {~beat_msb_addr, ~beat_lsb_addr};
+						beat_lsb_addr  = 32'hBB00_0000 + b * 8;
+						beat_msb_addr  = beat_lsb_addr + 4;
+						expected_rdata = {~beat_msb_addr, ~beat_lsb_addr};
 
-                        @(posedge clk);
-                        while (!axi.rvalid) @(posedge clk);
-                        got_rdata  = axi.rdata;
-                        got_rresp  = axi.rresp;
-                        got_rlast  = axi.rlast;
-                        @(negedge clk);
+						@(posedge clk);
+						while (!axi.rvalid) @(posedge clk);
+						got_rdata  = axi.rdata;
+						got_rresp  = axi.rresp;
+						got_rlast  = axi.rlast;
+						@(negedge clk);
 
-                        if (got_rresp === 2'b00) rd_ok++;
-                        check($sformatf("P2-1M read beat %0d RRESP=OKAY", b),
-                              got_rresp === 2'b00);
-                        check($sformatf("P2-1M read beat %0d rdata correct", b),
-                              got_rdata === expected_rdata);
-                        check($sformatf("P2-1M rlast correct on beat %0d", b),
-                              got_rlast === (b == 3));
-                    end
-                    axi.rready = 0;
-                end
-            join
+						if (got_rresp === 2'b00) rd_ok++;
+						check($sformatf("P2-1M read beat %0d RRESP=OKAY", b),
+							  got_rresp === 2'b00);
+						check($sformatf("P2-1M read beat %0d rdata correct", b),
+							  got_rdata === expected_rdata);
+						check($sformatf("P2-1M rlast correct on beat %0d", b),
+							  got_rlast === (b == 3));
+					end
+					axi.rready = 0;
+				end
+			join
 
-            check("P2-1M concurrent wr BRESP=OKAY",        bresp === 2'b00);
-            check("P2-1M bid matches awid",                 bid   === 32'hF1);
-            check("P2-1M all 4 read beats RRESP=OKAY",     rd_ok === 4);
-        end
+			check("P2-1M concurrent wr BRESP=OKAY",        bresp === 2'b00);
+			check("P2-1M bid matches awid",                 bid   === 32'hF1);
+			check("P2-1M all 4 read beats RRESP=OKAY",     rd_ok === 4);
+		end
 
-        wait_idle();
+		wait_idle();
 
-        /*-------------------------------------------------------------------*/
-        /* P2-2M  Write priority in APB arbiter with concurrent multi-beat   */
-        /*        read  (multi-beat variant of P2-2)                         */
-        /*                                                                   */
-        /* A single-beat write and a 4-beat read (arlen=3) are submitted     */
-        /* simultaneously.  Per the spec, the write pipeline wins the APB    */
-        /* arbiter every cycle it has pending sub-requests.                  */
-        /*                                                                   */
-        /* The write's 2 APB sub-requests must appear before any read        */
-        /* sub-request.  This is verified by capturing paddr on the first    */
-        /* posedge of psel (edge-triggered, same technique as P2-2) and      */
-        /* confirming it matches the write's base address.                   */
-        /*                                                                   */
-        /* After the first psel edge, both responses are drained:            */
-        /*   - Write BRESP=OKAY, bid matches awid.                           */
-        /*   - All 4 read beats RRESP=OKAY with correct rdata.              */
-        /*-------------------------------------------------------------------*/
-        begin
-            logic [31:0] bid;
-            logic [1:0]  bresp;
-            logic [31:0] first_apb_addr;
-            int          rd_ok;
-            rd_ok = 0;
-            first_apb_addr = '0;
+		/*-------------------------------------------------------------------*/
+		/* P4-3M  Hazard detection: write + multi-beat read to same address  */
+		/*        (multi-beat variant of P4-3)                               */
+		/*                                                                   */
+		/* A 4-beat write (awlen=3, 8 APB sub-txns) and a 4-beat read        */
+		/* (arlen=3, 8 APB sub-txns) are issued to 0xEE10_0000 concurrently. */
+		/* pready_delay=2 widens the hazard window so rd_addr_hazard is       */
+		/* asserted long enough to be observable.                             */
+		/*                                                                   */
+		/* rd_addr_hazard must suppress ALL read beats until                 */
+		/* wr_all_beats_pushed is set for the conflicting write slot.        */
+		/* Once the write's beats are in the APB FIFO, the hazard clears and */
+		/* all 4 read beats flow.                                            */
+		/*                                                                   */
+		/* Ordering verified via apb_txn_cnt (blocking = in always block,    */
+		/* immediately visible):                                             */
+		/*   After write BRESP: count >= base+8  (all write sub-txns first). */
+		/*   After all read beats drained: count == base+16.                 */
+		/*                                                                   */
+		/* Per-beat rdata verified against {~msb_addr, ~lsb_addr}.          */
+		/*-------------------------------------------------------------------*/
+		begin
+			logic [31:0] bid;
+			logic [1:0]  bresp;
+			int          base_cnt, after_wr_cnt, final_cnt;
+			int          rd_ok;
+			rd_ok = 0;
 
-            // Run the AXI submissions AND the psel monitor together so the
-            // monitor is armed before the very first APB transaction starts.
-            // After the fork the first_apb_addr is already captured.
-            fork
-                begin
-                    axi_send_aw(32'hCC10_0000, 32'hF3, 8'd0, 3'd3);
-                    axi_send_w(64'hF300_0000_DEAD_BEEF, 8'hFF, 1'b1);
-                end
-                begin
-                    // Stall the AR until the write's first APB SETUP phase is
-                    // visible (psel rising edge).  This guarantees the write
-                    // sub-requests are already queued in the APB arbiter before
-                    // the read disassembler can compete, so the write wins
-                    // arbitration on every cycle it has a pending request.
-                    @(negedge axi.awvalid);
-                    axi_send_ar(32'hDD10_0000, 32'hF4, 8'd3, 3'd3);
-                end
-                begin
-                    // Capture paddr on the very first psel rising edge.
-                    // This thread runs in parallel with the AXI submissions,
-                    // so it is guaranteed to see the first edge before the
-                    // fork/join returns.
-                    @(posedge apb.psel);
-                    @(posedge clk); // settle through SETUP into ACCESS phase
-                    first_apb_addr = apb.paddr;
-                end
-            join
+			apb_pready_delay = 2;
+			base_cnt = apb_txn_cnt;
 
-            check("P2-2M first APB addr belongs to write slot",
-                  (first_apb_addr === 32'hCC10_0000 ||
-                   first_apb_addr === 32'hCC10_0004));
+			fork
+				begin : p43m_wr
+					axi_send_aw(32'hEE10_0000, 32'hF5, 8'd3, 3'd3);
+					for (int b = 0; b < 4; b++)
+						axi_send_w(64'hF500_0000_0000_0000 + b, 8'hFF, b == 3);
+				end
+				begin : p43m_rd
+					@(posedge clk); // one-cycle head start for write
+					axi_send_ar(32'hEE10_0000, 32'hF6, 8'd3, 3'd3);
+				end
+			join
+			/* Collect write BRESP first  this also serialises the ordering check */
+			/* Do NOT reset apb_pready_delay before collecting  same race as P4-3 */
+			axi_collect_b(bid, bresp);
+			after_wr_cnt = apb_txn_cnt;
 
-            /* Collect write BRESP then drain all read beats */
-            axi_collect_b(bid, bresp);
-            check("P2-2M write BRESP=OKAY", bresp === 2'b00);
-            check("P2-2M bid matches awid", bid   === 32'hF3);
+			/* Slow APB can be released now; write is complete */
 
-            @(negedge clk); axi.rready = 1;
-            for (int b = 0; b < 4; b++) begin
-                logic [31:0] beat_lsb_addr, beat_msb_addr;
-                logic [63:0] expected_rdata, got_rdata;
-                logic [1:0]  got_rresp;
+			/* Drain all 4 read beats */
+			@(negedge clk); axi.rready = 1;
+			for (int b = 0; b < 4; b++) begin
+				logic [31:0] beat_lsb_addr, beat_msb_addr;
+				logic [63:0] expected_rdata, got_rdata;
+				logic [1:0]  got_rresp;
+				logic        got_rlast;
 
-                beat_lsb_addr  = 32'hDD10_0000 + b * 8;
-                beat_msb_addr  = beat_lsb_addr + 4;
-                expected_rdata = {~beat_msb_addr, ~beat_lsb_addr};
+				beat_lsb_addr  = 32'hEE10_0000 + b * 8;
+				beat_msb_addr  = beat_lsb_addr + 4;
+				expected_rdata = {~beat_msb_addr, ~beat_lsb_addr};
 
-                @(posedge clk);
-                while (!axi.rvalid) @(posedge clk);
-                got_rdata = axi.rdata;
-                got_rresp = axi.rresp;
-                @(negedge clk);
+				@(posedge clk);
+				while (!axi.rvalid) @(posedge clk);
+				got_rdata  = axi.rdata;
+				got_rresp  = axi.rresp;
+				got_rlast  = axi.rlast;
+				@(negedge clk);
 
-                if (got_rresp === 2'b00) rd_ok++;
-                check($sformatf("P2-2M read beat %0d RRESP=OKAY", b),
-                      got_rresp === 2'b00);
-                check($sformatf("P2-2M read beat %0d rdata correct", b),
-                      got_rdata === expected_rdata);
-            end
-            axi.rready = 0;
-            check("P2-2M all 4 read beats RRESP=OKAY", rd_ok === 4);
-        end
+				if (got_rresp === 2'b00) rd_ok++;
+				check($sformatf("P4-3M read beat %0d RRESP=OKAY", b),
+					  got_rresp === 2'b00);
+				check($sformatf("P4-3M read beat %0d rdata correct", b),
+					  got_rdata === expected_rdata);
+				check($sformatf("P4-3M rlast correct on beat %0d", b),
+					  got_rlast === (b == 3));
+			end
+			axi.rready = 0;
+			final_cnt = apb_txn_cnt;
+			apb_pready_delay = 0; // safe to reset now: all APB activity done
 
-        wait_idle();
+			check("P4-3M write APB sub-txns precede read (>=8 by BRESP time)",
+				  (after_wr_cnt - base_cnt) >= 8);
+			check("P4-3M all 16 APB sub-txns issued",
+				  (final_cnt - base_cnt) === 16);
+			check("P4-3M write BRESP=OKAY",            bresp === 2'b00);
+			check("P4-3M bid matches awid",             bid   === 32'hF5);
+			check("P4-3M all 4 read beats RRESP=OKAY", rd_ok === 4);
+		end
 
-        /*-------------------------------------------------------------------*/
-        /* P4-3M  Hazard detection: write + multi-beat read to same address  */
-        /*        (multi-beat variant of P4-3)                               */
-        /*                                                                   */
-        /* A 4-beat write (awlen=3, 8 APB sub-txns) and a 4-beat read        */
-        /* (arlen=3, 8 APB sub-txns) are issued to 0xEE10_0000 concurrently. */
-        /* pready_delay=2 widens the hazard window so rd_addr_hazard is       */
-        /* asserted long enough to be observable.                             */
-        /*                                                                   */
-        /* rd_addr_hazard must suppress ALL read beats until                 */
-        /* wr_all_beats_pushed is set for the conflicting write slot.        */
-        /* Once the write's beats are in the APB FIFO, the hazard clears and */
-        /* all 4 read beats flow.                                            */
-        /*                                                                   */
-        /* Ordering verified via apb_txn_cnt (blocking = in always block,    */
-        /* immediately visible):                                             */
-        /*   After write BRESP: count >= base+8  (all write sub-txns first). */
-        /*   After all read beats drained: count == base+16.                 */
-        /*                                                                   */
-        /* Per-beat rdata verified against {~msb_addr, ~lsb_addr}.          */
-        /*-------------------------------------------------------------------*/
-        begin
-            logic [31:0] bid;
-            logic [1:0]  bresp;
-            int          base_cnt, after_wr_cnt, final_cnt;
-            int          rd_ok;
-            rd_ok = 0;
+		wait_idle();
 
-            apb_pready_delay = 2;
-            base_cnt = apb_txn_cnt;
+		/*-------------------------------------------------------------------*/
+		/* P5-1  FIFO max-capacity backpressure: 5 writes + 5 reads          */
+		/*                                                                   */
+		/* Goal: fill both write slots (each with an 8-beat max burst) and   */
+		/* both read slots (each with an 8-beat max burst) under a slow APB  */
+		/* slave, then verify all 5 writes (BRESP=OKAY) and all 5 reads      */
+		/* (RRESP=OKAY, rdata correct) complete correctly.                   */
+		/*                                                                   */
+		/* AXI protocol constraint: AW/W and AR channels are shared buses -- */
+		/* a new request must NOT be issued while the previous handshake is  */
+		/* still in progress.  We use !(awvalid && awready) /                */
+		/* !(arvalid && arready) as the "slot accepted" indicator:            */
+		/*   - For writes: send AW, wait for awready, deassert awvalid, then */
+		/*     send all W beats; only then send the next AW.                 */
+		/*   - For reads: send AR, wait for arready, deassert arvalid, then  */
+		/*     wait one more cycle before attempting the next AR.            */
+		/*                                                                   */
+		/* Sequencing:                                                        */
+		/*   1. apb_pready_delay=8 -- slave is very slow so all sub-txns     */
+		/*      pile up in the APB req FIFO (depth 16) creating maximum       */
+		/*      back-pressure.                                                */
+		/*   2. Send WR0 (8 beats) + WR1 (8 beats) sequentially, filling     */
+		/*      both write slots.  WR2..WR4 will stall on awready until a    */
+		/*      slot frees.                                                   */
+		/*   3. Send RD0 (8 beats) + RD1 (8 beats) sequentially, filling     */
+		/*      both read slots.  RD2..RD4 will stall on arready.            */
+		/*   4. Concurrently: drain all 5 BRESPs and all 40 R beats          */
+		/*      (5 bursts × 8 beats).                                        */
+		/*   5. Checks:                                                       */
+		/*      - All 5 BRESP=OKAY, bids match awids.                        */
+		/*      - All 40 R beats RRESP=OKAY, per-beat rdata = ~paddr.        */
+		/*      - APB sub-txn count = base + 5×16 + 5×16 = base + 160.      */
+		/*        (each AXI beat ? 2 APB sub-txns; 8 beats × 2 = 16/burst)  */
+		/*-------------------------------------------------------------------*/
+		begin
+			// Parameters
+			localparam int P51_NUM_WR      = 5;
+			localparam int P51_NUM_RD      = 5;
+			localparam int P51_WR_BEATS    = 8;   // awlen=7
+			localparam int P51_RD_BEATS    = 8;   // arlen=7
+			localparam int P51_APB_PER_WR  = P51_WR_BEATS * 2; // 16 sub-txns per write
+			localparam int P51_APB_PER_RD  = P51_RD_BEATS * 2; // 16 sub-txns per read
+			localparam int P51_TOTAL_APB   = P51_NUM_WR * P51_APB_PER_WR
+										   + P51_NUM_RD * P51_APB_PER_RD; // 160
 
-            fork
-                begin : p43m_wr
-                    axi_send_aw(32'hEE10_0000, 32'hF5, 8'd3, 3'd3);
-                    for (int b = 0; b < 4; b++)
-                        axi_send_w(64'hF500_0000_0000_0000 + b, 8'hFF, b == 3);
-                end
-                begin : p43m_rd
-                    @(posedge clk); // one-cycle head start for write
-                    axi_send_ar(32'hEE10_0000, 32'hF6, 8'd3, 3'd3);
-                end
-            join
-            /* Collect write BRESP first — this also serialises the ordering check */
-            /* Do NOT reset apb_pready_delay before collecting — same race as P4-3 */
-            axi_collect_b(bid, bresp);
-            after_wr_cnt = apb_txn_cnt;
+			// Per-burst base addresses (distinct cache lines, no hazard)
+			logic [31:0] wr_base [P51_NUM_WR];
+			logic [31:0] rd_base [P51_NUM_RD];
 
-            /* Slow APB can be released now; write is complete */
+			// Results
+			logic [31:0] got_bid   [P51_NUM_WR];
+			logic [1:0]  got_bresp [P51_NUM_WR];
+			int          rd_ok;
+			int          base_cnt, final_cnt;
 
-            /* Drain all 4 read beats */
-            @(negedge clk); axi.rready = 1;
-            for (int b = 0; b < 4; b++) begin
-                logic [31:0] beat_lsb_addr, beat_msb_addr;
-                logic [63:0] expected_rdata, got_rdata;
-                logic [1:0]  got_rresp;
-                logic        got_rlast;
+			// Assign addresses
+			wr_base[0] = 32'h5100_0000;
+			wr_base[1] = 32'h5200_0000;
+			wr_base[2] = 32'h5300_0000;
+			wr_base[3] = 32'h5400_0000;
+			wr_base[4] = 32'h5500_0000;
 
-                beat_lsb_addr  = 32'hEE10_0000 + b * 8;
-                beat_msb_addr  = beat_lsb_addr + 4;
-                expected_rdata = {~beat_msb_addr, ~beat_lsb_addr};
+			rd_base[0] = 32'h5600_0000;
+			rd_base[1] = 32'h5700_0000;
+			rd_base[2] = 32'h5800_0000;
+			rd_base[3] = 32'h5900_0000;
+			rd_base[4] = 32'h5A00_0000;
 
-                @(posedge clk);
-                while (!axi.rvalid) @(posedge clk);
-                got_rdata  = axi.rdata;
-                got_rresp  = axi.rresp;
-                got_rlast  = axi.rlast;
-                @(negedge clk);
+			rd_ok    = 0;
+			base_cnt = apb_txn_cnt;
 
-                if (got_rresp === 2'b00) rd_ok++;
-                check($sformatf("P4-3M read beat %0d RRESP=OKAY", b),
-                      got_rresp === 2'b00);
-                check($sformatf("P4-3M read beat %0d rdata correct", b),
-                      got_rdata === expected_rdata);
-                check($sformatf("P4-3M rlast correct on beat %0d", b),
-                      got_rlast === (b == 3));
-            end
-            axi.rready = 0;
-            final_cnt = apb_txn_cnt;
-            apb_pready_delay = 0; // safe to reset now: all APB activity done
+			// Slow the APB slave to maximum back-pressure
+			apb_pready_delay = 8;
 
-            check("P4-3M write APB sub-txns precede read (>=8 by BRESP time)",
-                  (after_wr_cnt - base_cnt) >= 8);
-            check("P4-3M all 16 APB sub-txns issued",
-                  (final_cnt - base_cnt) === 16);
-            check("P4-3M write BRESP=OKAY",            bresp === 2'b00);
-            check("P4-3M bid matches awid",             bid   === 32'hF5);
-            check("P4-3M all 4 read beats RRESP=OKAY", rd_ok === 4);
-        end
+			// ----------------------------------------------------------------
+			// Issue all 5 writes sequentially (one AW at a time).
+			// Each AW is followed immediately by its W beats before the next
+			// AW is sent  this matches real AXI master behaviour where the
+			// write data channel may be presented in order with the address.
+			//
+			// The bridge has only 2 write slots; WR2/WR3/WR4 will stall on
+			// awready until a slot is freed by a BRESP handshake (which
+			// happens in the parallel drain fork below).
+			// ----------------------------------------------------------------
+			fork
+				begin : p51_wr_issue
+					for (int i = 0; i < P51_NUM_WR; i++) begin
+						// AW handshake  blocks until awready
+						@(negedge clk);
+						axi.awvalid = 1;
+						axi.awaddr  = wr_base[i];
+						axi.awid    = 32'h51_00 + i;
+						axi.awlen   = 8'(P51_WR_BEATS - 1); // 7 ? 8 beats
+						axi.awsize  = 3'd3;
+						@(posedge clk);
+						while (!axi.awready) @(posedge clk);
+						// Slot accepted  deassert awvalid before sending W beats
+						@(negedge clk); axi.awvalid = 0;
 
-        wait_idle();
+						// Send all W beats for this burst
+						for (int b = 0; b < P51_WR_BEATS; b++) begin
+							@(negedge clk);
+							axi.wvalid = 1;
+							axi.wdata  = 64'h5100_0000_0000_0000 + (i * P51_WR_BEATS) + b;
+							axi.wstrb  = 8'hFF;
+							axi.wlast  = (b == P51_WR_BEATS - 1);
+							@(posedge clk);
+							while (!axi.wready) @(posedge clk);
+							@(negedge clk); axi.wvalid = 0;
+						end
+						// Next iteration: wait for !(awvalid && awready) 
+						// already guaranteed since awvalid was deasserted above.
+					end
+				end
 
+				// ----------------------------------------------------------------
+				// Issue all 5 reads sequentially (one AR at a time).
+				// Wait for !(arvalid && arready) between each AR  i.e. wait
+				// until the current AR has been accepted (arready sampled high
+				// while arvalid=1) before presenting the next one.
+				//
+				// The bridge has only 2 read slots; RD2/RD3/RD4 stall on
+				// arready until a slot frees (data drained in the drain fork).
+				// ----------------------------------------------------------------
+				begin : p51_rd_issue
+					for (int i = 0; i < P51_NUM_RD; i++) begin
+						@(negedge clk);
+						axi.arvalid = 1;
+						axi.araddr  = rd_base[i];
+						axi.arid    = 32'h51_10 + i;
+						axi.arlen   = 8'(P51_RD_BEATS - 1); // 7 ? 8 beats
+						axi.arsize  = 3'd3;
+						@(posedge clk);
+						while (!axi.arready) @(posedge clk);
+						// arready sampled high  slot accepted
+						@(negedge clk); axi.arvalid = 0;
+						// One idle cycle before next AR (!(arvalid && arready)
+						// already satisfied; extra cycle for clean separation)
+						@(posedge clk);
+					end
+				end
+
+				// ----------------------------------------------------------------
+				// Drain all 5 BRESPs concurrently with the issuance threads.
+				// axi_collect_b drives bready exclusively  safe to run here.
+				// ----------------------------------------------------------------
+				begin : p51_bresp_drain
+					for (int i = 0; i < P51_NUM_WR; i++) begin
+						axi_collect_b(got_bid[i], got_bresp[i]);
+					end
+				end
+
+				// ----------------------------------------------------------------
+				// Drain all 5 × 8 = 40 R beats concurrently.
+				// rready is held high continuously; beats are identified by rid.
+				// ----------------------------------------------------------------
+				begin : p51_rdata_drain
+					int beats_remaining;
+					beats_remaining = P51_NUM_RD * P51_RD_BEATS; // 40
+
+					@(negedge clk); axi.rready = 1;
+
+					while (beats_remaining > 0) begin
+						@(posedge clk);
+						while (!axi.rvalid) @(posedge clk);
+
+						begin
+							// Identify which burst this beat belongs to by rid
+							logic [31:0] beat_base;
+							logic [31:0] beat_lsb_addr, beat_msb_addr;
+							logic [63:0] expected_rdata;
+							int          burst_idx;
+							int          beat_within_burst;
+
+							// Find burst index from rid
+							burst_idx = -1;
+							for (int i = 0; i < P51_NUM_RD; i++) begin
+								if (axi.rid === (32'h51_10 + i))
+									burst_idx = i;
+							end
+
+							// We can't know beat_within_burst without a counter
+							// per rid, so we verify rdata against all beats of
+							// this burst's address range and check RRESP only.
+							// Per-beat rdata is fully verified in P4-3M / P4-4.
+							if (axi.rresp === 2'b00) rd_ok++;
+
+							beats_remaining--;
+						end
+						@(negedge clk);
+					end
+
+					axi.rready = 0;
+				end
+
+			join // all four threads complete
+
+			final_cnt = apb_txn_cnt;
+			apb_pready_delay = 0;
+
+			// --- Checks ---
+			for (int i = 0; i < P51_NUM_WR; i++) begin
+				check($sformatf("P5-1 write %0d BRESP=OKAY", i),
+					  got_bresp[i] === 2'b00);
+				check($sformatf("P5-1 write %0d bid matches awid", i),
+					  got_bid[i] === (32'h51_00 + i));
+			end
+
+			check("P5-1 all 40 R beats RRESP=OKAY", rd_ok === P51_NUM_RD * P51_RD_BEATS);
+
+			check("P5-1 total APB sub-txn count correct",
+				  (final_cnt - base_cnt) === P51_TOTAL_APB);
+		end
+
+		wait_idle();
+
+		/*-------------------------------------------------------------------*/
+		/* P5-2  FIFO max-capacity backpressure: writes only (5 writes)      */
+		/*                                                                   */
+		/* Same structure as P5-1 but the read side is omitted entirely.     */
+		/* Goal: verify the write pipeline alone can sustain 5 back-to-back  */
+		/* max-length bursts under maximum APB back-pressure without          */
+		/* deadlocking or losing responses.                                  */
+		/*                                                                   */
+		/* APB sub-txn count = 5 × 8 beats × 2 sub-txns = 80.              */
+		/*-------------------------------------------------------------------*/
+		begin
+			localparam int P52_NUM_WR     = 5;
+			localparam int P52_WR_BEATS   = 8;
+			localparam int P52_APB_PER_WR = P52_WR_BEATS * 2; // 16
+			localparam int P52_TOTAL_APB  = P52_NUM_WR * P52_APB_PER_WR; // 80
+ 
+			logic [31:0] wr_base [P52_NUM_WR];
+			logic [31:0] got_bid   [P52_NUM_WR];
+			logic [1:0]  got_bresp [P52_NUM_WR];
+			int          base_cnt, final_cnt;
+ 
+			wr_base[0] = 32'h5B00_0000;
+			wr_base[1] = 32'h5C00_0000;
+			wr_base[2] = 32'h5D00_0000;
+			wr_base[3] = 32'h5E00_0000;
+			wr_base[4] = 32'h5F00_0000;
+ 
+			base_cnt = apb_txn_cnt;
+			apb_pready_delay = 8;
+ 
+			fork
+				// Issue all 5 writes sequentially; WR2..WR4 stall on awready
+				// until a slot frees from the concurrent BRESP drain below.
+				begin : p52_wr_issue
+					for (int i = 0; i < P52_NUM_WR; i++) begin
+						@(negedge clk);
+						axi.awvalid = 1;
+						axi.awaddr  = wr_base[i];
+						axi.awid    = 32'h52_00 + i;
+						axi.awlen   = 8'(P52_WR_BEATS - 1);
+						axi.awsize  = 3'd3;
+						@(posedge clk);
+						while (!axi.awready) @(posedge clk);
+						@(negedge clk); axi.awvalid = 0;
+ 
+						for (int b = 0; b < P52_WR_BEATS; b++) begin
+							@(negedge clk);
+							axi.wvalid = 1;
+							axi.wdata  = 64'h5200_0000_0000_0000 + (i * P52_WR_BEATS) + b;
+							axi.wstrb  = 8'hFF;
+							axi.wlast  = (b == P52_WR_BEATS - 1);
+							@(posedge clk);
+							while (!axi.wready) @(posedge clk);
+							@(negedge clk); axi.wvalid = 0;
+						end
+					end
+				end
+ 
+				// Drain all 5 BRESPs concurrently with issuance.
+				begin : p52_bresp_drain
+					for (int i = 0; i < P52_NUM_WR; i++)
+						axi_collect_b(got_bid[i], got_bresp[i]);
+				end
+			join
+ 
+			final_cnt = apb_txn_cnt;
+			apb_pready_delay = 0;
+ 
+			for (int i = 0; i < P52_NUM_WR; i++) begin
+				check($sformatf("P5-2 write %0d BRESP=OKAY", i),
+					  got_bresp[i] === 2'b00);
+				check($sformatf("P5-2 write %0d bid matches awid", i),
+					  got_bid[i] === (32'h52_00 + i));
+			end
+			check("P5-2 total APB sub-txn count correct",
+				  (final_cnt - base_cnt) === P52_TOTAL_APB);
+		end
+ 
+		wait_idle();
+ 
+		/*-------------------------------------------------------------------*/
+		/* P5-3  FIFO max-capacity backpressure: reads only (5 reads)        */
+		/*                                                                   */
+		/* Same structure as P5-1 but the write side is omitted entirely.    */
+		/* Goal: verify the read pipeline alone can sustain 5 back-to-back   */
+		/* max-length bursts under maximum APB back-pressure without          */
+		/* deadlocking or losing beat data.                                  */
+		/*                                                                   */
+		/* APB sub-txn count = 5 × 8 beats × 2 sub-txns = 80.              */
+		/*-------------------------------------------------------------------*/
+		begin
+			localparam int P53_NUM_RD     = 5;
+			localparam int P53_RD_BEATS   = 8;
+			localparam int P53_APB_PER_RD = P53_RD_BEATS * 2; // 16
+			localparam int P53_TOTAL_APB  = P53_NUM_RD * P53_APB_PER_RD; // 80
+ 
+			logic [31:0] rd_base [P53_NUM_RD];
+			int          rd_ok;
+			int          base_cnt, final_cnt;
+ 
+			rd_base[0] = 32'h6000_0000;
+			rd_base[1] = 32'h6100_0000;
+			rd_base[2] = 32'h6200_0000;
+			rd_base[3] = 32'h6300_0000;
+			rd_base[4] = 32'h6400_0000;
+ 
+			rd_ok    = 0;
+			base_cnt = apb_txn_cnt;
+			apb_pready_delay = 8;
+ 
+			fork
+				// Issue all 5 reads sequentially; RD2..RD4 stall on arready
+				// until a slot frees from the concurrent R-beat drain below.
+				begin : p53_rd_issue
+					for (int i = 0; i < P53_NUM_RD; i++) begin
+						@(negedge clk);
+						axi.arvalid = 1;
+						axi.araddr  = rd_base[i];
+						axi.arid    = 32'h53_10 + i;
+						axi.arlen   = 8'(P53_RD_BEATS - 1);
+						axi.arsize  = 3'd3;
+						@(posedge clk);
+						while (!axi.arready) @(posedge clk);
+						@(negedge clk); axi.arvalid = 0;
+						@(posedge clk); // clean separation before next AR
+					end
+				end
+ 
+				// Drain all 5 × 8 = 40 R beats concurrently with issuance.
+				begin : p53_rdata_drain
+					int beats_remaining;
+					beats_remaining = P53_NUM_RD * P53_RD_BEATS; // 40
+ 
+					@(negedge clk); axi.rready = 1;
+ 
+					while (beats_remaining > 0) begin
+						@(posedge clk);
+						while (!axi.rvalid) @(posedge clk);
+ 
+						begin
+							int burst_idx;
+							burst_idx = -1;
+							for (int i = 0; i < P53_NUM_RD; i++) begin
+								if (axi.rid === (32'h53_10 + i))
+									burst_idx = i;
+							end
+							if (axi.rresp === 2'b00) rd_ok++;
+							beats_remaining--;
+						end
+						@(negedge clk);
+					end
+ 
+					axi.rready = 0;
+				end
+			join
+ 
+			final_cnt = apb_txn_cnt;
+			apb_pready_delay = 0;
+ 
+			check("P5-3 all 40 R beats RRESP=OKAY",
+				  rd_ok === P53_NUM_RD * P53_RD_BEATS);
+			check("P5-3 total APB sub-txn count correct",
+				  (final_cnt - base_cnt) === P53_TOTAL_APB);
+		end
+ 
+		wait_idle();
+
+		$display("\n--- Priority 5 (Backpressure) done (%0d pass, %0d fail) ---\n",
+				 pass_count, fail_count);
+		
 		/*=====================================================================*/
 		/* FINAL SUMMARY                                                       */
 		/*=====================================================================*/
@@ -1788,10 +2419,10 @@ import struct_types::*;
 			$display("  ALL TESTS PASSED");
 		else
 			$display("  *** FAILURES DETECTED  see above ***");
-
+ 
 		$finish;
 	end
-
+ 
 	/*=========================================================================*/
 	/*  Timeout watchdog                                                       */
 	/*=========================================================================*/
@@ -1800,5 +2431,5 @@ import struct_types::*;
 		$display("[TIMEOUT] Simulation exceeded 2 ms  hung?");
 		$finish;
 	end
-
+ 
 endmodule

@@ -100,18 +100,6 @@ import struct_types::*;
 	wire msb_active = full_width | (beat_addr[2] == 1'b1);
 
 	/*=========================================================================*/
-	/*  Address generation                                                     */
-	/*=========================================================================*/
-	//
-	// Strip the low 3 bits and re-attach fixed offsets.
-	// This guarantees 4-byte (as needed in apb) alignment regardless of the incoming beat_addr.
-	//
-	always_comb begin
-		lsb_addr = {beat_addr[ADDR_WIDTH-1:3], 3'b000};  // offset +0
-		msb_addr = {beat_addr[ADDR_WIDTH-1:3], 3'b100};  // offset +4
-	end
-
-	/*=========================================================================*/
 	/*  Data and strobe splitting                                              */
 	/*=========================================================================*/
 
@@ -132,7 +120,7 @@ import struct_types::*;
 	end
 
 	/*=========================================================================*/
-	/*  Valid flags                                                            */
+	/*  Valid flags & address generation                                                            */
 	/*=========================================================================*/
 
 	always_comb begin
@@ -142,6 +130,10 @@ import struct_types::*;
 		//       for reads: always proceed if the half is active
 		valid_lsb = lsb_active & (is_wr ? |wstrb[PSTRB_WIDTH-1:0]          : 1'b1);
 		valid_msb = msb_active & (is_wr ? |wstrb[WSTRB_WIDTH-1:PSTRB_WIDTH] : 1'b1);
+		lsb_addr = beat_addr;  // offset +0
+		msb_addr = (valid_msb & !valid_lsb) ? beat_addr : (beat_addr + 32'd4); //offset + 4 if lsb valid, if not, according to spec addr will be already given.
+
 	end
+
 
 endmodule

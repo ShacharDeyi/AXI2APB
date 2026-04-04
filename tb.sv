@@ -1969,8 +1969,102 @@ import struct_types::*;
 					for (int b = 0; b < 4; b++)
 						axi_send_w(64'hF500_0000_0000_0000 + b, 8'hFF, b == 3);
 				end
+				
 				begin : p43m_rd
 					@(posedge clk); // one-cycle head start for write
+					axi_send_ar(32'hEE10_0000, 32'hF6, 8'd3, 3'd3);
+				end
+			join
+			/* Collect write BRESP first  this also serialises the ordering check */
+			/* Do NOT reset apb_pready_delay before collecting  same race as P4-3 */
+			axi_collect_b(bid, bresp);
+			after_wr_cnt = apb_txn_cnt;
+
+			/* Slow APB can be released now; write is complete */
+
+			/* Drain all 4 read beats */
+			@(negedge clk); axi.rready = 1;
+			for (int b = 0; b < 4; b++) begin
+				logic [31:0] beat_lsb_addr, beat_msb_addr;
+				logic [63:0] expected_rdata, got_rdata;
+				logic [1:0]  got_rresp;
+				logic        got_rlast;
+
+				beat_lsb_addr  = 32'hEE10_0000 + b * 8;
+				beat_msb_addr  = beat_lsb_addr + 4;
+				expected_rdata = {~beat_msb_addr, ~beat_lsb_addr};
+
+				@(posedge clk);
+				while (!axi.rvalid) @(posedge clk);
+				got_rdata  = axi.rdata;
+				got_rresp  = axi.rresp;
+				got_rlast  = axi.rlast;
+				@(negedge clk);
+
+				if (got_rresp === 2'b00) rd_ok++;
+				check($sformatf("P4-3M read beat %0d RRESP=OKAY", b),
+					  got_rresp === 2'b00);
+				check($sformatf("P4-3M read beat %0d rdata correct", b),
+					  got_rdata === expected_rdata);
+				check($sformatf("P4-3M rlast correct on beat %0d", b),
+					  got_rlast === (b == 3));
+			end
+			axi.rready = 0;
+			final_cnt = apb_txn_cnt;
+			apb_pready_delay = 0; // safe to reset now: all APB activity done
+
+			check("P4-3M write APB sub-txns precede read (>=8 by BRESP time)",
+				  (after_wr_cnt - base_cnt) >= 8);
+			check("P4-3M all 16 APB sub-txns issued",
+				  (final_cnt - base_cnt) === 16);
+			check("P4-3M write BRESP=OKAY",            bresp === 2'b00);
+			check("P4-3M bid matches awid",             bid   === 32'hF5);
+			check("P4-3M all 4 read beats RRESP=OKAY", rd_ok === 4);
+		end
+
+		wait_idle();
+
+		/*-------------------------------------------------------------------*/
+		/* P4-3MW  Hazard detection - same time request: write + multi-beat  */ 
+		/*         read to same address                                      */
+		/*        (multi-beat variant of P4-3)                               */
+		/*                                                                   */
+		/* A 4-beat write (awlen=3, 8 APB sub-txns) and a 4-beat read        */
+		/* (arlen=3, 8 APB sub-txns) are issued to 0xEE10_0000 concurrently. */
+		/* pready_delay=2 widens the hazard window so rd_addr_hazard is      */
+		/* asserted long enough to be observable.                            */
+		/*                                                                   */
+		/* rd_addr_hazard must suppress ALL read beats until                 */
+		/* wr_all_beats_pushed is set for the conflicting write slot.        */
+		/* Once the write's beats are in the APB FIFO, the hazard clears and */
+		/* all 4 read beats flow.                                            */
+		/*                                                                   */
+		/* Ordering verified via apb_txn_cnt (blocking = in always block,    */
+		/* immediately visible):                                             */
+		/*   After write BRESP: count >= base+8  (all write sub-txns first). */
+		/*   After all read beats drained: count == base+16.                 */
+		/*                                                                   */
+		/* Per-beat rdata verified against {~msb_addr, ~lsb_addr}.          */
+		/*-------------------------------------------------------------------*/
+		begin
+			logic [31:0] bid;
+			logic [1:0]  bresp;
+			int          base_cnt, after_wr_cnt, final_cnt;
+			int          rd_ok;
+			rd_ok = 0;
+
+			apb_pready_delay = 2;
+			base_cnt = apb_txn_cnt;
+
+			fork
+				begin : p43m_wr
+					axi_send_aw(32'hEE10_0000, 32'hF5, 8'd3, 3'd3);
+					for (int b = 0; b < 4; b++)
+						axi_send_w(64'hF500_0000_0000_0000 + b, 8'hFF, b == 3);
+				end
+				
+				begin : p43m_rd
+					@(negedge axi.awvalid);
 					axi_send_ar(32'hEE10_0000, 32'hF6, 8'd3, 3'd3);
 				end
 			join

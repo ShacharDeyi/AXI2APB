@@ -176,7 +176,7 @@ import struct_types::*;
 	} pipe_state_t;
 
 	/*=====================================================================*/
-	/*  Write pipeline FSM + alloc pointer                                */
+	/*  Write pipeline FSM + alloc pointer                                 */
 	/*=====================================================================*/
 
 	pipe_state_t  wr_state;
@@ -184,7 +184,7 @@ import struct_types::*;
 	logic         wr_alloc_ptr;     // next slot to allocate (toggles on each pop)
 
 	/*=====================================================================*/
-	/*  Read pipeline FSM + alloc pointer                                 */
+	/*  Read pipeline FSM + alloc pointer                                  */
 	/*=====================================================================*/
 
 	pipe_state_t  rd_state;
@@ -192,9 +192,9 @@ import struct_types::*;
 	logic         rd_alloc_ptr;
 
 	/*=====================================================================*/
-	/*  Per-slot beat state write pipeline  [0:1]                       */
-	/*  Indexed by slot_idx, not by wr_active_slot alone, because slot 0  */
-	/*  may be in WAIT_RESP while slot 1 is in DISPATCH simultaneously.   */
+	/*  Per-slot beat state write pipeline  [0:1]                          */
+	/*  Indexed by slot_idx, not by wr_active_slot alone, because slot 0   */
+	/*  may be in WAIT_RESP while slot 1 is in DISPATCH simultaneously.    */
 	/*=====================================================================*/
 
 	logic [MAX_LEN-1:0]       wr_beat_index       [0:1];
@@ -215,7 +215,7 @@ import struct_types::*;
 	struct_types::axi_wr_data wr_data_q [0:1]; // wr_data storage per slot (refreshed each beat)
 
 	/*=====================================================================*/
-	/*  Per-slot beat state  read pipeline  [0:1]                        */
+	/*  Per-slot beat state  read pipeline  [0:1]                          */
 	/*=====================================================================*/
 
 	logic [MAX_LEN-1:0]       rd_beat_index      [0:1];
@@ -267,7 +267,7 @@ import struct_types::*;
 	struct_types::apb_struct  builder_wr_apb_lsb, builder_wr_apb_msb;
 
 	/*=====================================================================*/
-	/*  Disassembler wires  read                                          */
+	/*  Disassembler wires  read                                           */
 	/*=====================================================================*/
 
 	logic [ADDR_WIDTH-1:0]   dis_rd_beat_addr;
@@ -279,7 +279,7 @@ import struct_types::*;
 	struct_types::apb_struct  builder_rd_apb_lsb, builder_rd_apb_msb;
 
 	/*=====================================================================*/
-	/*  Assembler / resp-builder wires                            */
+	/*  Assembler / resp-builder wires                                     */
 	/*=====================================================================*/
 
 	logic [1:0]               asm_resp;
@@ -470,36 +470,30 @@ import struct_types::*;
 	end
 
 	/*=====================================================================*/
-	/*  Accept conditions                                                   */
+	/*  Accept conditions                                                  */
 	/*=====================================================================*/
 	// Write first request: FSM in IDLE, alloc_ptr slot is free, no hazard.
 	// Write wins any simultaneous-arrival tie with a read by construction
 	// (see hazard policy above).
-	assign wr_can_accept = (wr_state == ST_IDLE) &&
-						   !wr_req_empty && !wr_data_empty &&
-						   rf_slot_free_wr[wr_alloc_ptr] &&
-						   !wr_addr_hazard;
+	assign wr_can_accept = (wr_state == ST_IDLE) && !wr_req_empty && !wr_data_empty &&
+						    rf_slot_free_wr[wr_alloc_ptr] && !wr_addr_hazard;
 
 	// Write second request: FSM in WAIT_RESP or DISPATCH, active slot last
 	// beat already pushed, other slot free, no conflicting read still pushing.
 	assign wr_can_accept_next = (wr_state == ST_WAIT_RESP || wr_state == ST_DISPATCH) &&
-								!wr_req_empty && !wr_data_empty &&
-								wr_all_beats_pushed[wr_active_slot] &&
-								rf_slot_free_wr[wr_alloc_ptr] &&
-								!wr_addr_hazard;
+								!wr_req_empty && !wr_data_empty && wr_all_beats_pushed[wr_active_slot] &&
+								 rf_slot_free_wr[wr_alloc_ptr] && !wr_addr_hazard;
 
 	// Read first request: FSM in IDLE, alloc_ptr slot is free, no live write
 	// covers the same cache line (rd_addr_hazard blocks entry into DISPATCH).
-	assign rd_can_accept = (rd_state == ST_IDLE) &&
-						   !rd_req_empty && rf_slot_free_rd[rd_alloc_ptr] &&
-						   !rd_addr_hazard;
+	assign rd_can_accept = (rd_state == ST_IDLE) && !rd_req_empty &&
+						    rf_slot_free_rd[rd_alloc_ptr] && !rd_addr_hazard;
 
 	// Read second request: FSM in WAIT_RESP or DISPATCH, active slot done
 	// pushing, other slot free, no conflicting write in flight.
 	assign rd_can_accept_next = (rd_state == ST_WAIT_RESP || rd_state == ST_DISPATCH) &&
 								!rd_req_empty && rd_all_beats_pushed[rd_active_slot] &&
-								rf_slot_free_rd[rd_alloc_ptr] &&
-								!rd_addr_hazard;
+								 rf_slot_free_rd[rd_alloc_ptr] && !rd_addr_hazard;
 
 	/*=====================================================================*/
 	/*  Sub-module: write disassembler                                     */
@@ -575,15 +569,15 @@ import struct_types::*;
 
 	/*=====================================================================*/
 	/*  Completing slot selection                                          */
-	/*  wr_completing_slot / wr_completing: which write slot has a beat   */
-	/*  ready to assemble this cycle, and whether any slot does at all.   */
-	/*  Priority: slot 0 over slot 1 on simultaneous completion (rare).   */
-	/*  Fallback: wr_active_slot so the mux never points at an            */
+	/*  wr_completing_slot / wr_completing: which write slot has a beat    */
+	/*  ready to assemble this cycle, and whether any slot does at all.    */
+	/*  Priority: slot 0 over slot 1 on simultaneous completion (rare).    */
+	/*  Fallback: wr_active_slot so the mux never points at an             */
 	/*  unallocated slot when nothing is completing.                       */
-	/*  Derived from registered state only — NOT from apb_tag_fifo_out   */
-	/*  or apb_resp_pop_n — so the mux select is stable on the cycle the  */
+	/*  Derived from registered state only — NOT from apb_tag_fifo_out     */
+	/*  or apb_resp_pop_n — so the mux select is stable on the cycle the   */
 	/*  final response arrives (the _done flags clock in that same cycle). */
-	/*  rd_completing_slot: symmetric for the read pipeline.              */
+	/*  rd_completing_slot: symmetric for the read pipeline.               */
 	/*=====================================================================*/
 
 	logic wr_completing_slot;
@@ -595,8 +589,8 @@ import struct_types::*;
 		wr_completing_slot = wr_active_slot; // safe fallback
 		wr_completing      = 1'b0;
 		for (int s = 0; s < 2; s++) begin
-		if ((wr_req_lsb_pending[s] || wr_req_msb_pending[s]) &&
-			wr_resp_all_done[s] && (logic'(s) == wr_active_slot ? wr_state == ST_WAIT_RESP : wr_all_beats_pushed[s])) begin
+		if ((wr_req_lsb_pending[s] || wr_req_msb_pending[s]) && wr_resp_all_done[s] &&
+			(logic'(s) == wr_active_slot ? wr_state == ST_WAIT_RESP : wr_all_beats_pushed[s])) begin
 				wr_completing_slot = logic'(s);
 				wr_completing      = 1'b1;
 				break; // slot 0 wins tie (loop goes 0 first)
@@ -606,8 +600,7 @@ import struct_types::*;
 		// Read
 		rd_completing_slot = rd_active_slot; // safe fallback
 		for (int s = 0; s < 2; s++) begin
-			if ((rd_req_lsb_pending[s] || rd_req_msb_pending[s]) &&
-				rd_resp_all_done[s]) begin
+			if ((rd_req_lsb_pending[s] || rd_req_msb_pending[s]) && rd_resp_all_done[s]) begin
 				rd_completing_slot = logic'(s);
 				break; // slot 0 wins tie
 			end
@@ -656,15 +649,14 @@ import struct_types::*;
 	// wr_data: popped when write pipeline accepts a new request (beat 0)
 	// or when returning to DISPATCH for the next beat (data_latched goes low).
 	assign wr_data_pop_n = !(wr_can_accept || wr_can_accept_next ||
-							(wr_state == ST_DISPATCH && !wr_data_latched[wr_active_slot] 
-							&& !wr_data_empty));
+							(wr_state == ST_DISPATCH && !wr_data_latched[wr_active_slot] && !wr_data_empty));
 
 	/*=====================================================================*/
 	/*  APB request push + tag push arbitration                        	   */
 	/*                                                                     */
 	/*  Write pipeline wins over read pipeline every cycle, UNLESS the     */
 	/*  read pipeline has already pushed its LSB and is waiting to push    */
-	/*  its MSB (rd_beat_in_progress). Interrupting a partially-pushed    */
+	/*  its MSB (rd_beat_in_progress). Interrupting a partially-pushed     */
 	/*  beat would interleave LSB/MSB pairs from different pipelines in    */
 	/*  the APB req FIFO, causing the response router to deadlock because  */
 	/*  a response arrives for pipeline A while pipeline B is waiting.     */
@@ -677,10 +669,8 @@ import struct_types::*;
 	// and are never stalled waiting on the read side's MSB slot.)
 	logic rd_beat_in_progress;
 
-	assign rd_beat_in_progress = (rd_state == ST_DISPATCH) &&
-								  rd_lsb_done[rd_active_slot] &&
-								  !rd_req_msb_pushed[rd_active_slot] &&
-								  dis_rd_valid_msb;
+	assign rd_beat_in_progress = (rd_state == ST_DISPATCH) && rd_lsb_done[rd_active_slot] &&
+								  !rd_req_msb_pushed[rd_active_slot] && dis_rd_valid_msb;
 
 	always_comb begin
 		apb_req_push_n  = 1'b1;
@@ -701,8 +691,7 @@ import struct_types::*;
 					apb_tag_fifo_in = '{is_wr: 1'b1, slot_idx: wr_active_slot, is_msb: 1'b0};
 
 				end else if ((wr_lsb_done[wr_active_slot] || !dis_wr_valid_lsb) &&
-							 !wr_req_msb_pushed[wr_active_slot] &&
-							 dis_wr_valid_msb) begin
+							 !wr_req_msb_pushed[wr_active_slot] && dis_wr_valid_msb) begin
 					apb_req_push_n  = 1'b0;
 					apb_req_fifo_in = builder_wr_apb_msb;
 					apb_tag_push_n  = 1'b0;
@@ -813,12 +802,12 @@ import struct_types::*;
 				wr_resp_lsb_done   [s] <= 1'b0;
 				wr_resp_msb_done   [s] <= 1'b0;
 				wr_all_beats_pushed[s] <= 1'b0;
-				wr_resp_lsb_data  [s] <= '0;
-				wr_resp_lsb_err   [s] <= 1'b0;
-				wr_resp_msb_data  [s] <= '0;
-				wr_resp_msb_err   [s] <= 1'b0;
-				wr_data_latched   [s] <= 1'b0;
-				wr_data_q         [s] <= '0;
+				wr_resp_lsb_data   [s] <= '0;
+				wr_resp_lsb_err    [s] <= 1'b0;
+				wr_resp_msb_data   [s] <= '0;
+				wr_resp_msb_err    [s] <= 1'b0;
+				wr_data_latched    [s] <= 1'b0;
+				wr_data_q          [s] <= '0;
 			end
 		end else begin
 
@@ -963,7 +952,7 @@ import struct_types::*;
 	end
 
 	/*=====================================================================*/
-	/*  Read pipeline sequential FSM  (symmetric to write)                */
+	/*  Read pipeline sequential FSM  (symmetric to write)                 */
 	/*=====================================================================*/
 
 	always_ff @(posedge clk or negedge rst_n) begin
@@ -981,10 +970,10 @@ import struct_types::*;
 				rd_resp_lsb_done   [s] <= 1'b0;
 				rd_resp_msb_done   [s] <= 1'b0;
 				rd_all_beats_pushed[s] <= 1'b0;
-				rd_resp_lsb_data  [s] <= '0;
-				rd_resp_lsb_err   [s] <= 1'b0;
-				rd_resp_msb_data  [s] <= '0;
-				rd_resp_msb_err   [s] <= 1'b0;
+				rd_resp_lsb_data   [s] <= '0;
+				rd_resp_lsb_err    [s] <= 1'b0;
+				rd_resp_msb_data   [s] <= '0;
+				rd_resp_msb_err    [s] <= 1'b0;
 			end
 		end else begin
 

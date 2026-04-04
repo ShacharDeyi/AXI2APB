@@ -2,7 +2,7 @@
  * File          : tb.sv
  * Project       : AXI2APB Bridge
  * Authors       : Shachar & Sahar
- * Description   : Comprehensive testbench for the AXI3?APB4 bridge.
+ * Description   : Comprehensive testbench for the AXI-to-APB bridge.
  *
  * ============================================================================
  * DESIGN UNDER TEST PARAMETERS
@@ -16,58 +16,55 @@
  * ============================================================================
  * APB SLAVE MODEL
  * ============================================================================
- *   Combinational response: prdata = ~paddr (write-gated: 0 on writes).
- *   Three control knobs driven exclusively by the initial block (blocking =):
+ *   Combinational response: prdata = ~paddr (returns 0 on writes, unused).
+ *   Three control knobs, all owned exclusively by the initial block (blocking =):
  *
  *     apb_pready_delay  int    Extra ACCESS cycles before pready fires.
- *                               Decremented via blocking = inside the always
- *                               block so it persists across transactions until
- *                               explicitly reset.  Default: 0.
+ *                               Latched into a private wait_cnt at the
+ *                               SETUP->ACCESS transition; apb_pready_delay
+ *                               itself is never written by the always block.
+ *                               Default: 0.
  *
  *     apb_inject_err    logic  While 1, asserts pslverr on every APB response.
- *                               Arm/disarm from the initial block only  never
- *                               from the always block  to avoid multiple-driver
- *                               X-propagation (root cause of original P1-10
- *                               timeout).  Default: 0.
+ *                               Must only be written by the initial block to
+ *                               avoid multiple-driver X-propagation.
+ *                               Default: 0.
  *
  *     apb_txn_cnt       int    Running count of completed APB transactions.
  *                               Incremented via blocking = in the always block
  *                               so wait() in the initial block sees it
- *                               immediately.  Used by P1-9 to synchronise
- *                               error injection to a specific sub-transaction.
+ *                               immediately.  Used by error-injection tests to
+ *                               synchronise to a specific sub-transaction.
  *
- *   SINGLE-DRIVER RULE: the always block never writes apb_inject_err,
- *   apb_pready_delay, or apb_txn_cnt with non-blocking <=.  Mixing blocking
- *   and non-blocking assignments on the same variable from different processes
- *   is a multiple-driver violation that causes X in VCS.
+ *   SINGLE-DRIVER RULE: the always block never writes apb_inject_err or
+ *   apb_pready_delay with non-blocking <=.  Mixing blocking and non-blocking
+ *   assignments on the same variable from different processes is a
+ *   multiple-driver violation that causes X in VCS.
  *
  * ============================================================================
  * AXI MASTER TASKS
  * ============================================================================
- *   axi_send_aw(addr, id, len, size)      AW handshake (blocking)
- *   axi_send_w(data, strb, last)          W  handshake (blocking)
- *   axi_collect_b(bid_out, bresp_out)     B  handshake (blocking)
+ *   axi_send_aw(addr, id, len, size)   AW handshake — blocks until awready.
+ *   axi_send_w(data, strb, last)       W  handshake — blocks until wready.
+ *   axi_collect_b(bid_out, bresp_out)  B  handshake — blocks until bvalid.
  *   axi_write(addr, id, data, strb, size, bresp_out)
- *                                          Single-beat write convenience task.
- *                                          Uses fork/join for AW+W, then
- *                                          collects B sequentially.
- *                                          NOT thread-safe for bready  never
- *                                          call from multiple parallel threads.
+ *                                       Single-beat write convenience wrapper.
+ *                                       Sends AW and W in a fork/join, then
+ *                                       collects B sequentially.
  *
- *   axi_send_ar(addr, id, len, size)      AR handshake (blocking)
+ *   axi_send_ar(addr, id, len, size)   AR handshake — blocks until arready.
  *   axi_collect_r(rid, rdata, rresp, rlast)
- *                                          R  handshake (blocking).
- *                                          Sets rready on negedge for clean
- *                                          setup time; samples outputs on the
- *                                          posedge where rvalid fires.
+ *                                       R  handshake — blocks until rvalid.
+ *                                       Sets rready on negedge for clean setup
+ *                                       time; samples outputs on the posedge
+ *                                       where rvalid fires.
  *   axi_read(addr, id, size, rdata, rresp)
- *                                          Single-beat read convenience task.
+ *                                       Single-beat read convenience wrapper.
  *
- *   THREAD SAFETY: axi_send_aw, axi_send_w, axi_send_ar all drive shared AXI
- *   interface signals.  They must never run concurrently  doing so causes
- *   signal races that corrupt transactions.  axi_collect_b and axi_collect_r
- *   each drive a dedicated ready signal (bready / rready) and are safe to run
- *   concurrently with each other but not with another instance of themselves.
+ *   THREAD SAFETY: axi_send_aw, axi_send_w, and axi_send_ar all drive shared
+ *   AXI interface signals and must never run concurrently.  axi_collect_b and
+ *   axi_collect_r each drive a dedicated ready signal and are safe to run
+ *   concurrently with each other, but not with another instance of themselves.
  *
  * ============================================================================
  * HELPER TASKS
@@ -79,8 +76,7 @@
  *
  *   check(name, condition)   Prints [PASS]/[FAIL] and increments counters.
  *
- *   do_reset(cycles=5)       Asserts rst_n=0 for N posedges, releases on
- *                             negedge.
+ *   do_reset(cycles=5)       Asserts rst_n=0 for N posedges, then releases.
  *
  * ============================================================================
  * TEST LIST
@@ -88,165 +84,176 @@
  *
  * PRIORITY 1  Basic functional correctness
  * ------------------------------------------
- *  P1-1  Single-beat write (awlen=0, size=3, full 8B width)
+ *  P1-1  Single-beat write (awlen=0, size=3, full 8-byte width)
  *         Verifies BRESP=OKAY end-to-end through both APB halves.
  *
- *  P1-2  Single-beat read (arlen=0, size=3, full 8B width)
- *         Verifies RRESP=OKAY and that rdata[31:0]=~lsb_addr,
- *         rdata[63:32]=~msb_addr (sideband tag routes each APB half
- *         to the correct rdata lane).
+ *  P1-2  Single-beat read (arlen=0, size=3, full 8-byte width)
+ *         Verifies RRESP=OKAY and correct data routing: rdata[31:0]=~lsb_addr,
+ *         rdata[63:32]=~msb_addr.
  *
- *  P1-3  Narrow write  LSB half only (size=2, addr[2]=0)
+ *  P1-3  Narrow write — LSB half only (size=2, addr[2]=0)
  *         Only the LSB APB sub-transaction is generated; MSB is suppressed.
  *
- *  P1-4  Narrow write  MSB half only (size=2, addr[2]=1)
+ *  P1-4  Narrow write — MSB half only (size=2, addr[2]=1)
  *         Only the MSB APB sub-transaction is generated.
  *
  *  P1-5  Write strobe: LSB lanes only (wstrb=8'h0F, size=3)
- *         Verifies disassembler suppresses MSB half (pstrb[7:4]=0 ? not valid
- *         for write).  Checks: exactly 1 APB sub-txn issued (apb_txn_cnt+1),
- *         and pstrb captured during ACCESS phase equals 4'hF.
+ *         Disassembler must suppress the MSB half (pstrb[7:4]=0 => not valid
+ *         for write).  Checks: exactly 1 APB sub-txn issued and
+ *         pstrb captured during the ACCESS phase equals 4'hF.
  *
  *  P1-6  Write strobe: MSB lanes only (wstrb=8'hF0, size=3)
- *         Symmetric to P1-5: addr[2]=1 (0x4000_0004) ? MSB half only.
- *         Checks: 1 sub-txn, pstrb=4'hF on that txn.
+ *         Symmetric to P1-5: LSB half suppressed.  Checks: 1 sub-txn,
+ *         pstrb=4'hF on that transaction.
  *
- *  P1-7  Max-length write burst (awlen=7 ? 8 beats, size=3)
+ *  P1-7  Max-length write burst (awlen=7, size=3 — 8 beats)
  *         AW sent in parallel with all 8 W beats.  Checks BRESP=OKAY and
  *         bid matches awid.
  *
- *  P1-8  Max-length read burst (arlen=7 ? 8 beats, size=3)
+ *  P1-8  Max-length read burst (arlen=7, size=3 — 8 beats)
  *         Checks all 8 beats RRESP=OKAY, rlast asserted on beat 7,
  *         rid matches arid.
  *
  *  P1-9  PSLVERR on mid-burst write beat (beat 3 of 8)
- *         Uses apb_txn_cnt to arm apb_inject_err on exactly sub-txn 6
- *         (LSB of AXI beat 3, 0-indexed).  The single-use clear is done
- *         by the initial block monitoring apb_txn_cnt  no multiple-driver
- *         conflict.  Verifies the bridge ORs the error into final BRESP=SLVERR.
+ *         apb_txn_cnt used to arm apb_inject_err on exactly sub-txn 6
+ *         (LSB of AXI beat 3).  Error cleared after exactly one sub-txn.
+ *         Verifies the bridge OR-accumulates the error into final BRESP=SLVERR.
  *
- *  P1-10 PSLVERR on read response
- *         apb_inject_err=1 held for all sub-txns of a single-beat read.
- *         Verifies RRESP=2'b10.
+ *  P1-10  PSLVERR on a single-beat read
+ *          apb_inject_err=1 held for all sub-txns.  Verifies RRESP=SLVERR.
  *
- *  P1-10b PSLVERR on mid-burst READ beat (beat 3 of 8)
- *         Mirrors P1-9 for the read path. Uses apb_txn_cnt to arm
- *         apb_inject_err on sub-txn 6 (LSB of AXI beat 3). Verifies at
- *         least one RRESP=SLVERR is returned and rlast/rid are correct.
+ *  P1-10b PSLVERR on mid-burst read beat (beat 3 of 8)
+ *          Mirrors P1-9 for the read path.  Verifies at least one beat returns
+ *          RRESP=SLVERR and rlast/rid are correct.
  *
- *  P1-10c PSLVERR on FIRST beat of write burst (beat 0 of 8)
- *         Error injected on sub-txn 0 only; all other beats clean.
- *         Verifies early error is captured and BRESP=SLVERR is returned.
+ *  P1-10c PSLVERR on the first beat of a write burst (beat 0 of 8)
+ *          Error injected on sub-txn 0 only; all other beats clean.
+ *          Verifies BRESP=SLVERR is still returned (early error not lost).
  *
- *  P1-10d PSLVERR on LAST beat of write burst (beat 7 of 8)
- *         Error injected on sub-txn 14 (LSB of beat 7); all earlier beats
- *         clean. Verifies a late error is still propagated into BRESP=SLVERR
- *         (no early-exit after the first clean beat).
+ *  P1-10d PSLVERR on the last beat of a write burst (beat 7 of 8)
+ *          Error injected on sub-txn 14 only; all earlier beats clean.
+ *          Verifies late error is still propagated into BRESP=SLVERR.
  *
- *  P1-10e PSLVERR on MULTIPLE non-contiguous beats (beats 1 & 5 of 8)
- *         Two separate error injections on sub-txns 2 and 10. Verifies the
- *         bridge OR-accumulates scattered errors into a single BRESP=SLVERR.
+ *  P1-10e PSLVERR on multiple non-contiguous write beats (beats 1 & 5 of 8)
+ *          Errors injected on sub-txns 2 and 10 separately.
+ *          Verifies OR-accumulation of scattered errors into BRESP=SLVERR.
  *
- *  P1-11 Transaction ID preservation
- *         awid=0xDEAD_BEEF echoed in bid; arid=0xCAFE_F00D echoed in rid.
- *         Both IDs captured via task output arguments (not by re-sampling
- *         the interface after the handshake window closes).
+ *  P1-11  Transaction ID preservation
+ *          awid=0xDEAD_BEEF echoed in bid; arid=0xCAFE_F00D echoed in rid.
+ *          Both IDs captured via task output arguments (not by re-sampling
+ *          the interface after the handshake window closes).
  *
  * PRIORITY 2  Concurrency and arbitration
  * ------------------------------------------
- *  P2-1  Simultaneous write + read (one slot each, no data mixing)
- *         Write and read issued in a fork/join.  Checks both responses OKAY
- *         and bid ? rid (no cross-contamination).
+ *  P2-1   Simultaneous write + read (one slot each, no data mixing)
+ *          Write and read issued in a fork/join.  Checks both responses OKAY
+ *          and bid != rid (no cross-contamination).
  *
- *  P2-2  Write pipeline APB push priority (slot 0 before slot 1)
- *         Two back-to-back writes; first APB paddr sampled on posedge of
- *         psel (edge-triggered to avoid level race).  Verifies slot-0 base
- *         address appears first.
+ *  P2-1M  Simultaneous multi-beat write (awlen=3) + multi-beat read (arlen=3)
+ *          Fork/join to different addresses (no hazard).  Verifies all 4 read
+ *          beats return RRESP=OKAY with correct per-beat rdata and rlast,
+ *          and BRESP=OKAY with correct bid.
  *
- *  P2-3  Back-to-back writes (4 serial writes, no idle gap)
- *         Each write's BRESP is collected before the next AW is sent,
- *         verifying the bridge handles continuous throughput cleanly.
+ *  P2-2M  Write APB priority: single-beat write + 4-beat read submitted
+ *          simultaneously.  The write's 2 APB sub-requests must appear before
+ *          any read sub-request.  Verified by capturing paddr on the first
+ *          psel rising edge.  All 4 read beats and the write response checked.
  *
- *  P2-4  Sideband tag routing
- *         Single-beat read verifies rdata[31:0]=~lsb_addr and
- *         rdata[63:32]=~msb_addr end-to-end through the
- *         disassembler?apb_tag?assembler path.
- *         (The original MSB-first APB slave mode was removed: a sequential
- *         APB master cannot have two transactions in-flight simultaneously,
- *         so holding pready=0 on the LSB permanently stalls the master.)
+ *  P2-2MW  Write APB priority: 4-beat write + 4-beat read submitted
+ *           simultaneously (full multi-beat variant).  Same psel-capture
+ *           verification as P2-2M.  All 4 read beats checked per-beat for
+ *           correctness.
  *
- *  P2-5  Pipelined write slots  wr_can_accept_next path
- *         Both bursts (len=3) are queued in wr_req_fifo / wr_data_fifo
- *         BEFORE the APB slave is slowed (pready_delay=2).  This is
- *         required because awready is gated on slot_free_wr  setting the
- *         delay first would deadlock on the 2nd AW.  With both bursts
- *         queued, slot 1 is accepted via wr_can_accept_next while slot 0
- *         is still in ST_WAIT_RESP.  Verifies both BRESP=OKAY and correct
- *         bid values.
+ *  P2-3   Back-to-back writes (4 serial writes, no idle gap)
+ *          Each write's BRESP collected before the next AW is sent.
  *
- *  P2-6  Pipelined read slots  rd_can_accept_next path
- *         Symmetric to P2-5.  Both ARs queued before APB is slowed.
- *         All 8 R beats (4 per burst) drained and checked per rid.
+ *  P2-4   Sideband tag routing
+ *          Single-beat read verifies rdata[31:0]=~lsb_addr and
+ *          rdata[63:32]=~msb_addr end-to-end through the
+ *          disassembler->tag->assembler path.
+ *
+ *  P2-5   Pipelined write slots (wr_can_accept_next path)
+ *          Both bursts (len=3) queued before the APB slave is slowed
+ *          (pready_delay=2).  Slot 1 accepted via wr_can_accept_next while
+ *          slot 0 is still in ST_WAIT_RESP.  Verifies both BRESP=OKAY and
+ *          correct bid values.
+ *
+ *  P2-6   Pipelined read slots (rd_can_accept_next path)
+ *          Symmetric to P2-5.  Both ARs queued before APB is slowed.
+ *          All 8 R beats (4 per burst) drained and checked per rid.
  *
  * PRIORITY 3  Flow control and robustness
  * ------------------------------------------
- *  P3-1  Write + read pipeline independence
- *         One AR queued, then 5 serial writes issued concurrently.  Because
- *         the write and read pipelines are fully independent FSMs (no
- *         starvation counter exists in the RTL), the read FSM accepts the AR
- *         and processes it independently of write activity.  Verifies all 5
- *         writes and the 1 read complete OKAY with no timeout.
+ *  P3-1   Write + read pipeline independence
+ *          One AR queued, then 5 serial writes run concurrently.  The read
+ *          FSM processes the AR independently of write activity.  Verifies
+ *          all 5 writes and the 1 read complete OKAY with no timeout.
  *
- *  P3-2  Concurrent write + read, distinct addresses
- *         One write and one read issued simultaneously.  No hazard (different
- *         cache lines).  Write wins APB arbiter each cycle it pushes; read
- *         uses idle cycles.  Both must complete OKAY.
+ *  P3-2   Concurrent write + read, distinct addresses (no hazard)
+ *          Both must complete OKAY; write wins the APB arbiter each cycle
+ *          it pushes.
  *
- *  P3-3  APB req FIFO back-pressure (2-slot batched writes)
- *         The bridge has 2 write slots; a 3rd AW stalls on awready until a
- *         slot frees (BRESP collected).  Strategy: send 2 AW+W pairs upfront
- *         with pready_delay=3 so both slots dispatch and their 4 APB sub-
- *         requests pile up in the FIFO while the slave is slow.  Collect both
- *         BRESPs (still slow), then repeat for writes 3 & 4.  Back-pressure
- *         is active throughout all 4 writes.  All 4 BRESP=OKAY verified.
+ *  P3-3   APB req FIFO back-pressure
+ *          Both write slots filled under pready_delay=3.  APB sub-requests
+ *          accumulate in the FIFO while the slave is slow.  All 4 writes
+ *          (2 batches of 2) complete OKAY.
  *
- *  P3-4  Slow PREADY (multi-cycle ACCESS phase)
- *         pready_delay=5 applied to concurrent write + read.  Verifies the
- *         apb_master holds psel/penable and waits correctly for pready.
+ *  P3-4   Slow PREADY (multi-cycle ACCESS phase)
+ *          pready_delay=5, concurrent write + read.  Verifies apb_master
+ *          holds psel/penable and waits correctly for pready.
  *
- *  P3-5  Reset during active burst
- *         8-beat write burst started; rst_n asserted after 10 cycles
- *         (mid-burst).  After reset and quiesce, a fresh single-beat write
- *         and read must both complete OKAY.
+ *  P3-5   Reset during active burst
+ *          8-beat write started; rst_n asserted mid-burst after 10 cycles.
+ *          After reset, a fresh single-beat write and read must both complete
+ *          OKAY.
  *
  * PRIORITY 4  Stress and regression
  * ------------------------------------
- *  P4-1  Randomised burst stress (size=3, len 0-7, 10 iterations)
- *         Alternating reads (even iterations) and writes (odd iterations)
- *         with random burst lengths.  size=3 (full-width) is used
- *         throughout  narrow transactions are covered precisely by P1-3
- *         through P1-6 and don't add stress value here.  wait_idle() called
- *         between every iteration.  Checks majority of transactions OKAY.
+ *  P4-1   Randomised burst stress (size=3, len 0-7, 10 iterations)
+ *          Alternating reads (even) and writes (odd) with random burst
+ *          lengths.  Majority of transactions must return OKAY.
  *
- *  P4-2  Address boundary crossing
- *         Write burst (len=3) starting at 0xFFFFFFF8 (8 B from 32-bit wrap).
- *         Read burst (len=1) starting at 0xFFFFFFF0.  Both cross the 4 B
- *         boundary (beat_addr[2] toggles).  rresp captured inside the drain
- *         loop on the last beat  NOT after rready=0 (signal may be stale).
+ *  P4-2   Address boundary crossing
+ *          Write burst (len=3) from 0xFFFFFFF8; read burst (len=1) from
+ *          0xFFFFFFF0.  Both cross the 4-byte boundary (beat_addr[2] toggles).
  *
- *  P4-3  Hazard detection: write + read to same address
- *         A 4-beat write (awlen=3, 8 APB sub-txns) and a single-beat read
- *         (2 APB sub-txns) are issued to 0xCC00_0000 concurrently.
- *         Write BRESP collected first (sequentially), then read beat drained.
- *         Ordering verified via apb_txn_cnt: after write BRESP, count =
- *         base+8 confirms all write sub-txns preceded the read's 2.
- *         Final count must equal base+10.  rdata correctness also checked.
+ *  P4-3   Hazard detection: 4-beat write + single-beat read to same address
+ *          Ordering verified via apb_txn_cnt: all 8 write sub-txns must
+ *          precede the read's 2.  rdata correctness also checked.
  *
- *  P4-4  Hazard detection under stress  burst write + burst read
- *         Same mechanism as P4-3 with a 2-beat read (arlen=1, 4 APB sub-txns)
- *         to 0xEE00_0000.  Total = 12 APB sub-txns.  Run after P4-1/P4-2 so
- *         slot-state machinery is in a non-reset state.  Per-beat rdata
- *         checked against {~msb_addr, ~lsb_addr} for each read beat.
+ *  P4-3M  Hazard detection: 4-beat write + 4-beat read to same address
+ *          (multi-beat read variant of P4-3).  rd_addr_hazard must suppress
+ *          all read beats until wr_all_beats_pushed.  16 total APB sub-txns;
+ *          per-beat rdata and rlast verified.
+ *
+ *  P4-3MW Hazard detection: same as P4-3M but write and read arrive at the
+ *          same time (AR stalled until awvalid drops, i.e. after AW accepted).
+ *          Verifies write wins the tie and ordering is preserved.
+ *
+ *  P4-4   Hazard detection under stress: 4-beat write + 2-beat read to same
+ *          address.  12 total APB sub-txns.  Per-beat rdata checked.
+ *
+ * PRIORITY 5  Maximum back-pressure
+ * ------------------------------------
+ *  P5-1   5 writes + 5 reads simultaneously (8 beats each) under
+ *          pready_delay=8.  Slots fill and stall on awready/arready until
+ *          responses drain.  All 5 BRESPs=OKAY and all 40 R beats=OKAY.
+ *          Total APB sub-txn count = 160 verified.
+ *
+ *  P5-2   Write-only variant of P5-1 (5 writes, 80 APB sub-txns).
+ *          Verifies the write pipeline alone sustains throughput under maximum
+ *          back-pressure without deadlock.
+ *
+ *  P5-3   Read-only variant of P5-1 (5 reads, 80 APB sub-txns).
+ *          Verifies the read pipeline alone sustains throughput without
+ *          deadlock or data loss.
+ *
+ * PRIORITY 6  Narrow beat within a burst
+ * -----------------------------------------
+ *  P6-1   4-beat write (awlen=3, size=3).  Beats 0-2 use wstrb=8'hFF
+ *          (both APB halves active, 2 sub-txns each).  Beat 3 (wlast) uses
+ *          wstrb=8'h0F (LSB lanes only), so the disassembler suppresses the
+ *          MSB half.  Expected APB sub-txn count = 7.  BRESP=OKAY.
  *
  *------------------------------------------------------------------------------*/
 `timescale 1ns/1ps
@@ -296,24 +303,11 @@ import struct_types::*;
 	logic apb_inject_err;     // assert pslverr on every APB response while high
 	int   apb_txn_cnt;        // counts completed APB transactions (blocking = only)
 	logic apb_req_waiting;
-	// FIX #4: apb_msb_first_mode removed  a sequential APB master can have at
-	// most one transaction in-flight; holding pready=0 on the LSB permanently
-	// stalls the master and the MSB transaction is never presented.
-	// P2-4 is re-implemented using the tag-routing check (see below).
-	//
-	// MULTIPLE-DRIVER FIX: apb_inject_err, apb_err_once, apb_pready_delay, and
-	// apb_txn_cnt are ONLY ever written by the initial block (blocking =).
-	// The always block ONLY READS them  it never uses non-blocking <= on these
-	// variables.  Previously apb_inject_err and apb_err_once were also written
-	// via <= inside the always block (the "apb_err_once auto-clear"), which is
-	// a multiple-driver violation that causes X-propagation in VCS and is the
-	// root cause of the P1-10 timeout: apb_inject_err went X, making pslverr X,
-	// which propagated through the APB resp FIFO into the manager's error state,
-	// leaving rd_resp_all_done stuck low so rvalid never fired.
-	//
-	// The auto-clear is now handled by a dedicated always @(posedge clk) monitor
-	// that uses only blocking = (same driver domain as the initial block) and
-	// watches apb_txn_cnt to know when a transaction completed.
+	// MULTIPLE-DRIVER RULE: apb_inject_err, apb_pready_delay, and apb_txn_cnt
+	// are ONLY ever written by the initial block (blocking =).  The always block
+	// ONLY READS them.  Mixing blocking and non-blocking assignments on the same
+	// variable from different always processes is a multiple-driver violation
+	// that causes X-propagation in VCS.
 
 	// Initialise control knobs once at time-zero (before rst_n is driven).
 	// apb.pready / apb.prdata / apb.pslverr are now driven by always_comb
@@ -327,32 +321,14 @@ import struct_types::*;
 
 	// APB slave response logic.
 	//
-	// pready MUST be combinational: the APB spec requires pready to be
-	// sampled by the master on the same posedge that psel & penable are
-	// high.  A registered pready always arrives one cycle late  after
-	// psel/penable have already dropped  which is the "extra high cycle"
-	// seen in the waveform.
+	// pready must be combinational: the APB spec requires pready to be
+	// sampled by the master on the same posedge that psel & penable are high.
 	//
-	// Strategy:
-	//   - always_comb drives pready/prdata/pslverr purely from current
-	//     psel, penable, and the delay counter (no flip-flop).
-	//   - always_ff on posedge clk handles the side-effects that must be
-	//     clocked: decrementing apb_pready_delay and incrementing
-	//     apb_txn_cnt (blocking = so the initial block sees it immediately).
-
-	// APB slave response logic.
-	//
-	// pready is combinational so it is visible to the master in the same
-	// cycle that psel & penable are high (APB spec requirement).
-	//
-	// apb_pready_delay (set by the test body) is sampled once at the
-	// SETUP->ACCESS transition (posedge where psel=1, penable=0) into a
-	// private counter 'wait_cnt'.  From that point only wait_cnt is
-	// decremented; apb_pready_delay is never touched by the always block,
-	// so there is no multiple-driver conflict even if the test body changes
-	// apb_pready_delay mid-simulation.  This also prevents a mid-ACCESS
-	// retraction of pready if the test body sets the delay after the master
-	// has already entered the ACCESS phase.
+	// apb_pready_delay is latched into a private counter wait_cnt at the
+	// SETUP->ACCESS transition (posedge where psel=1, penable=0). Only wait_cnt
+	// is decremented inside the always block; apb_pready_delay is never touched
+	// there, avoiding any multiple-driver conflict even if the test body changes
+	// it mid-simulation.
 
 	int wait_cnt; // private per-transaction countdown (not driven by test body)
 
@@ -427,9 +403,9 @@ import struct_types::*;
 		@(negedge clk); axi.wvalid = 0;
 	endtask
 
-	// --- Write response channel  collect one response ---
-	// FIX #3: bid_out is an output argument; caller must use it for ID checks
-	// rather than sampling axi.bid after the task returns (signal may be gone).
+	// --- Write response channel: collect one response ---
+	// bid_out is an output argument; use it for ID checks rather than
+	// re-sampling axi.bid after the task returns (signal may already be gone).
 	task automatic axi_collect_b(
 		output logic [31:0] bid_out,
 		output logic [1:0]  bresp_out
@@ -475,13 +451,12 @@ import struct_types::*;
 		@(negedge clk); axi.arvalid = 0;
 	endtask
 
-	// --- Read data channel  collect one beat ---
+	// --- Read data channel: collect one beat ---
 	// rready is set on a negedge for clean setup time vs DUT.
 	// Outputs are sampled on the posedge where rvalid && rready (handshake).
-	// rready is held for one extra half-cycle (until the following negedge)
-	// so that axi_slave_rd, which drives rid/rdata combinationally from the
-	// FIFO output, has time to resolve its outputs before we deassert rready
-	// and the FIFO potentially moves on to the next entry.
+	// rready is held for one extra half-cycle so that axi_slave_rd, which
+	// drives rid/rdata combinationally from the FIFO output, has time to
+	// resolve before the FIFO potentially advances on the next entry.
 	task automatic axi_collect_r(
 		output logic [31:0] rid_out,
 		output logic [63:0] rdata_out,
@@ -491,12 +466,8 @@ import struct_types::*;
 		@(negedge clk); axi.rready = 1;
 		@(posedge clk);
 		while (!axi.rvalid) @(posedge clk);
-		// Posedge: handshake completes. Sample outputs  they are stable here
-		// because rready only just went high (on the negedge before this posedge
-		// for the first beat, or the negedge after the previous posedge for
-		// subsequent beats in a burst loop).  The DUT's rvalid/rid/rdata are
-		// driven by registered logic in axi_slave_rd so they are stable at
-		// this posedge (setup time was the preceding negedge).
+		// Posedge: handshake completes. Sample outputs — they are stable here
+		// because rvalid/rid/rdata are driven by registered logic in axi_slave_rd.
 		rid_out   = axi.rid;
 		rdata_out = axi.rdata;
 		rresp_out = axi.rresp;
@@ -1835,26 +1806,6 @@ import struct_types::*;
 
 		$display("\n--- Priority 4 done (%0d pass, %0d fail) ---\n",
 				 pass_count, fail_count);
-
-/*===========================================================================
- * New Tests: Multi-beat read variants of P2-1, P2-2, and P4-3
- *
- * Insert these blocks in the main test sequence in tb.sv after the
- * existing Priority-4 tests (before the FINAL SUMMARY block), or add
- * them to their respective Priority sections.  The descriptions below
- * are written to match the existing header-comment style.
- *
- * All three tests are self-contained begin/end blocks that declare
- * their own local variables so they slot in cleanly.
- *
- * APB slave model reminder:
- *   prdata = ~paddr  (combinational, only on reads)
- *   Expected rdata per beat:  rdata[31:0]  = ~lsb_addr
- *                             rdata[63:32] = ~msb_addr
- *   where lsb_addr = {beat_addr[31:3], 3'b000}
- *         msb_addr = {beat_addr[31:3], 3'b100}
- *         beat_addr = base_addr + beat_index * 8  (size=3, INCR)
- *===========================================================================*/
 
 		/*-------------------------------------------------------------------*/
 		/* P2-1M  Simultaneous multi-beat write + multi-beat read            */

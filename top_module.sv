@@ -3,18 +3,30 @@
  * Project       : RTL
  * Author        : epsdso
  * Creation date : Jul 5, 2025
- * Description   : AXI-to-APB bridge top level.
+ * Description   : AXI-to-APB bridge — structural top level.
  *
  * RESPONSIBILITY
  * ==============
  * top_module owns:
- *   - All inter-module FIFOs (data highways between modules)
+ *   - All inter-module FIFOs (the data highways connecting modules)
  *   - Module instantiation and port wiring
  *
- * top_module does NOT own:
+ * top_module does NOT contain:
  *   - Any logic (no FSMs, no counters, no data manipulation)
- *   - Modules that serve only one other module (e.g. register_file,
- *     disassembler, assembler -- those live inside manager)
+ *   - Modules that serve only one other module; register_file,
+ *     disassembler, assembler, apb_req_builder, and axi_resp_builder
+ *     are all instantiated inside manager.
+ *
+ * FIFO OVERVIEW
+ * =============
+ *   AXI write side : wr_req_fifo (AW), wr_data_fifo (W), wr_resp_fifo (B)
+ *   AXI read side  : rd_req_fifo (AR), rd_data_fifo (R)
+ *   APB            : apb_req_fifo, apb_resp_fifo, apb_tag_fifo (sideband)
+ *
+ * The sideband tag FIFO travels in lockstep with the APB request FIFO
+ * (both pushed together by manager) and is popped together with the APB
+ * response FIFO so the manager always knows which slot and half each
+ * response belongs to.
  *------------------------------------------------------------------------------*/
 
 module top_module
@@ -184,10 +196,10 @@ import struct_types::*;
     /*=========================================================================*/
     /*  APB request FIFO + sideband tag FIFO                                   */
     /*=========================================================================*/
-    // apb_req_queue  : carries full APB request struct to apb_master
-    // apb_tag_queue  : routing tag in parallel
-    // Both pushed together by manager; tag popped together with apb_resp
-    // so manager always knows which slot/half each response belongs to.
+    // apb_req_queue : carries full APB request structs from manager to apb_master.
+    // apb_tag_queue : routing tag pushed alongside each request, popped alongside
+    //                 each response, so the manager always knows which pipeline
+    //                 slot and half (LSB/MSB) a response belongs to.
 
     DW_fifo_s1_sf #(
         .width ($bits(apb_struct)),

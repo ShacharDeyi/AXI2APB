@@ -3,27 +3,33 @@
  * Project       : RTL
  * Author        : epsdso
  * Creation date : Jul 5, 2025
- * Description   :
+ * Description   : APB4 bus interface definition.
+ *
+ *   Declares all APB signals and exposes two modports:
+ *     - master : used by apb_master (drives requests, reads responses)
+ *     - slave  : used by the APB slave / testbench model
+ *
+ *   Using a SystemVerilog interface enforces correct signal directions
+ *   at compile time and simplifies port lists throughout the design.
  *------------------------------------------------------------------------------*/
 `timescale 1ns/1ps
 
-// APB4 interfcae
-interface apb_interface();	
+interface apb_interface();
 //APB interface
 	parameter PADDR_WIDTH = 32;
-	parameter PDATA_WIDTH = 32; //should be 32, might need 64 for compatibility while testing
+	parameter PDATA_WIDTH = 32;
 	parameter PSTRB_WIDTH = PDATA_WIDTH/8; 
 	
 	
-	logic [PADDR_WIDTH-1:0] 	paddr; 		/*TRANSACTION ADDRESS*/
-	logic 						psel; 		/*The Requester generates a PSELx signal for each Completer. PSELx indicates that the Completer is selected and that a data transfer is required.*/
-	logic 						penable; 	/*PENABLE indicates the second and subsequent cycles of an APB transfer.*/
-	logic [PDATA_WIDTH-1:0] 	pwdata; 	/*The PWDATA write data bus is driven by the APB bridge Requester during write cycles when PWRITE is HIGH. */
-	logic 						pwrite; 	/*PWRITE INDICATES AN APB WRITE ACCESS WHEN HIGH AND AN APB READ ACCESS WHEN LOW.*/
-	logic [PSTRB_WIDTH-1:0] 	pstrb;		/*PSTRB indicates which byte lanes to update during a write transfer*/
-	logic 						pready;
-	logic [PDATA_WIDTH-1:0] 	prdata; 	/*The PRDATA read data bus is driven by the selected Completer during read cycles when PWRITE is LOW.*/
-	logic 						pslverr; 	/*PSLVERR is an optional signal that can be asserted HIGH by the Completer to indicate an error condition on an APB transfer.*/ 
+	logic [PADDR_WIDTH-1:0] 	paddr; 		// Transaction address
+	logic 						psel; 		// Slave select; asserted by the master to indicate a transfer is required
+	logic 						penable; 	// Asserted on the second (and any subsequent wait) cycle of a transfer
+	logic [PDATA_WIDTH-1:0] 	pwdata; 	// Write data, driven by the master during write cycles (pwrite=1)
+	logic 						pwrite; 	// Direction: 1=write, 0=read
+	logic [PSTRB_WIDTH-1:0] 	pstrb;		// Byte enables: which byte lanes to update on a write
+	logic 						pready;     // Slave ready; when low, slave inserts wait states
+	logic [PDATA_WIDTH-1:0] 	prdata; 	// Read data, driven by the slave during read cycles (pwrite=0)
+	logic 						pslverr; 	// Slave error; when high, indicates the transfer ended with an error
 	
 	modport slave (
 		

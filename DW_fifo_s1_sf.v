@@ -1,32 +1,33 @@
 `timescale 1ns/1ps
 
 /*------------------------------------------------------------------------------
- * File          : DW_fifo_s1_sf.sv
- * Description   : Drop-in replacement for the DesignWare DW_fifo_s1_sf
- *                 synchronous single-clock FIFO.
+ * File          : DW_fifo_s1_sf.v
+ * Description   : Synchronous single-clock FIFO — drop-in replacement for the
+ *                 DesignWare DW_fifo_s1_sf primitive.
  *
- * Parameters:
- *   width  - data width in bits
- *   depth  - number of entries (must be >= 2)
+ * PARAMETERS
+ *   width  — data width in bits
+ *   depth  — number of entries (must be >= 2)
  *
- * Ports (matching DW_fifo_s1_sf exactly):
- *   clk        - clock
- *   rst_n      - active-low synchronous reset
- *   push_req_n - active-low push strobe  (data_in written when low)
- *   pop_req_n  - active-low pop strobe   (data_out advances when low)
- *   data_in    - write data
- *   data_out   - read data (head of FIFO, combinational)
- *   full       - asserted when FIFO cannot accept more entries
- *   empty      - asserted when FIFO has no valid entries
+ * PORTS  (identical to DW_fifo_s1_sf)
+ *   clk        — clock
+ *   rst_n      — active-low synchronous reset
+ *   push_req_n — active-low push strobe; data_in is written when low
+ *   pop_req_n  — active-low pop strobe; data_out advances when low
+ *   data_in    — write data
+ *   data_out   — read data at the head of the FIFO (combinational)
+ *   full       — high when the FIFO cannot accept more entries
+ *   empty      — high when the FIFO has no valid entries
  *
- * Notes:
+ * BEHAVIOUR
+ *   - First-word fall-through: data_out reflects the current head entry
+ *     combinationally (i.e., without a clock edge after push).
  *   - Simultaneous push + pop when neither full nor empty is supported;
- *     the count stays the same and data flows through in one cycle.
- *   - data_out is the entry at the current read pointer (registered),
- *     matching DW_fifo_s1_sf's "first-word fall-through" behaviour.
- *   - Pushing when full or popping when empty is ignored (no error port
- *     needed for this bridge, but the conditions are flagged via $display
- *     in simulation).
+ *     the occupancy count stays the same and data flows through in one cycle.
+ *   - Pushing when full or popping when empty is silently ignored.
+ *   - Full/empty detection uses the standard extra-MSB pointer scheme:
+ *       full  = same lower bits, different wrap bits
+ *       empty = pointers identical
  *------------------------------------------------------------------------------*/
 
 module DW_fifo_s1_sf #(
@@ -43,26 +44,23 @@ module DW_fifo_s1_sf #(
 	output logic             empty
 );
 
-	// Pointer width: needs to count 0..depth-1, plus one extra bit for
-	// full/empty disambiguation (standard 2^n trick; works for any depth
-	// because we compare the full pointer values, not just the lower bits).
+	// Pointer width: one extra bit beyond the index for full/empty disambiguation.
+	// Full  = same index bits, different wrap bits.
+	// Empty = pointers identical.
 	localparam int PTR_W = $clog2(depth) + 1;
 
 	logic [width-1:0]  mem  [0:depth-1];
 	logic [PTR_W-1:0]  wr_ptr;   // next write slot
 	logic [PTR_W-1:0]  rd_ptr;   // next read slot
 
-	// Lower bits are the actual index; MSB is the wrap bit.
 	wire [PTR_W-2:0] wr_idx = wr_ptr[PTR_W-2:0];
 	wire [PTR_W-2:0] rd_idx = rd_ptr[PTR_W-2:0];
 
-	// Full  : pointers match but wrap bits differ
-	// Empty : pointers are identical
 	assign full  = (wr_ptr[PTR_W-2:0] == rd_ptr[PTR_W-2:0]) &&
 				   (wr_ptr[PTR_W-1]   != rd_ptr[PTR_W-1]);
 	assign empty = (wr_ptr == rd_ptr);
 
-	// data_out: registered head of FIFO (first-word fall-through emulation)
+	// data_out is the head entry driven combinationally from mem (FWFT).
 	assign data_out = mem[rd_idx];
 
 	wire do_push = !push_req_n && !full;

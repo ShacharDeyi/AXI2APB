@@ -1,58 +1,54 @@
 /*------------------------------------------------------------------------------
  * File          : register_file.sv
  * Project       : RTL
- * Description   : 4-slot transaction register file for the AXI-to-APB bridge.
+ * Description   : 4-slot transaction store for the AXI-to-APB bridge.
  *
  * OVERVIEW
  * ========
- * Provides 2 write slots and 2 read slots. Each slot owns one AXI transaction
- * from the moment its request header is stored (allocation) to the moment the
- * assembled AXI response is drained back to the slave (done).
+ * Provides 2 write slots and 2 read slots. Each slot holds one AXI transaction
+ * from the moment its request header is stored (allocation) until the assembled
+ * AXI response has been delivered (done).
  *
  * SLOT LIFECYCLE
  * ==============
- *   1. ALLOCATION   manager asserts alloc_wr / alloc_rd, supplies the AXI
- *                   request header and the slot index (alloc_slot_wr/rd).
- *                   The slot transitions from FREE -> ACTIVE.
- *                   The request header is stored in a DW03_reg_s_pl instance
- *                   so the manager can read it back every cycle to compute
- *                   beat addresses.
+ *   1. ALLOCATION   Manager asserts alloc_wr / alloc_rd with the target slot
+ *                   index and the request header. The header is stored in a
+ *                   DW03_reg_s_pl instance so the manager can read it back
+ *                   every cycle to compute beat addresses.
+ *                   Slot state: FREE -> ACTIVE.
  *
- *   2. RESPONSE     As APB sub-responses arrive, the manager writes an
- * ACCUMULATION      assembled axi_wr_resp / axi_rd_data into the slot via
- *                   resp_wr_wr / resp_wr_rd.  For reads every beat produces
- *                   a new rd_data beat; for writes only the final beat
- *                   triggers a write (accumulated bresp).
+ *   2. RESPONSE     As APB responses arrive, the manager writes the assembled
+ *    ACCUMULATION   axi_wr_resp into the slot via resp_wr_en / resp_slot_wr.
+ *                   (Read responses bypass this module entirely and are pushed
+ *                   directly to rd_data_fifo by the manager.)
  *
- *   3. COMPLETION   manager asserts resp_valid_set_wr / _rd (with the slot
- *                   index) to flag the slot as response-ready. The slot
- *                   transitions ACTIVE -> READY.
+ *   3. COMPLETION   Manager asserts resp_valid_set_wr to mark the slot
+ *                   response-ready after the burst's final beat completes.
+ *                   Slot state: ACTIVE -> READY.
  *
- *   4. DRAIN        The AXI slave side reads wr_resp_out / rd_data_out
- *                   (always the read-pointer slot) and asserts done_wr /
- *                   done_rd.  The slot transitions READY -> FREE and the
- *                   read pointer advances.
+ *   4. DRAIN        Manager pushes the response to wr_resp_fifo when
+ *                   resp_ready_wr is high, then asserts done_wr. The slot
+ *                   returns to FREE and the read pointer advances.
  *
  * POINTER SCHEME
  * ==============
- * Independent write (alloc) and read (drain) pointers per direction,
- * toggling between 0 and 1. This is the standard 2-entry FIFO scheme.
- * The alloc pointer lives in the MANAGER (it knows when to allocate);
- * this module receives the explicit slot index on every alloc/resp write.
- * The read pointer lives here and advances on done_wr / done_rd.
+ * Each direction (write / read) has an independent allocation pointer (in the
+ * manager) and a drain pointer (here), both toggling between 0 and 1. This is
+ * the standard 2-entry in-order FIFO scheme: slots are always allocated and
+ * drained in order.
  *
  * STORAGE
  * =======
- * Request headers and response data are stored in DW03_reg_s_pl instances
- * (synchronous FF with active-low reset and enable).  Per-slot control
- * bits (valid, resp_ready) are plain always_ff registers.
+ * Request headers and write response data are stored in DW03_reg_s_pl
+ * instances (synchronous FF with active-low reset and clock enable).
+ * Per-slot control bits (valid, resp_ready) use plain always_ff registers.
  *
  * PROTOCOL CONTRACT (manager must obey)
  * ======================================
  *   - alloc_wr/rd must not be asserted when the target slot is not free
  *     (slot_free_wr/rd[slot] == 0).
- *   - resp_valid_set_wr/rd must only be asserted for an already-active slot.
- *   - done_wr/rd must only be asserted when resp_ready_wr/rd is high.
+ *   - resp_valid_set_wr must only be asserted for an already-active slot.
+ *   - done_wr must only be asserted when resp_ready_wr is high.
  *------------------------------------------------------------------------------*/
 `timescale 1ns/1ps
 
@@ -63,42 +59,42 @@ import struct_types::*;
 	input  logic   rst_n,
 
 	/*--------------------------------------------------------------------*/
-	/* Write direction  2 slots                                          */
+	/* Write direction — 2 slots                                          */
 	/*--------------------------------------------------------------------*/
 
-	// Allocation: manager pops wr_req_fifo and immediately stores the header.
+	// Allocation: manager pops wr_req_fifo and stores the header immediately.
 	input  logic                        alloc_wr,           // 1 = allocate this cycle
-	input  logic                        alloc_slot_wr,      // which slot (0 or 1)
-	input  struct_types::axi_wr_req     alloc_req_wr,       // header to store
+	input  logic                        alloc_slot_wr,      // target slot (0 or 1)
+	input  struct_types::axi_wr_req     alloc_req_wr,       // request header to store
 
-	// Header readback: manager reads these every cycle for beat-addr computation.
+	// Header readback: manager reads these every cycle for beat-address computation.
 	output struct_types::axi_wr_req     req_out_wr  [0:1],
 
-	// Response write: manager writes assembled bresp as beats complete.
+	// Response write: manager writes the assembled bresp as beats complete.
 	input  logic                        resp_wr_en,         // 1 = write this cycle
-	input  logic                        resp_slot_wr,       // which slot
+	input  logic                        resp_slot_wr,       // target slot
 	input  struct_types::axi_wr_resp    resp_in_wr,         // assembled response
 
-	// Completion: manager signals the slot's response is final.
-	input  logic                        resp_valid_set_wr,  // 1 = mark slot done
-	input  logic                        resp_valid_slot_wr, // which slot
+	// Completion: manager signals the slot's response is final (last beat done).
+	input  logic                        resp_valid_set_wr,  // 1 = mark slot ready
+	input  logic                        resp_valid_slot_wr, // target slot
 
-	// Drain: AXI slave has consumed the response; advance read pointer.
+	// Drain: AXI slave has consumed the response; advance the read pointer.
 	input  logic                        done_wr,
 	input  logic                        done_rd,
 
-	// Outputs to AXI slave (always from read-pointer slot).
+	// Outputs to AXI slave (always driven from the read-pointer slot).
 	output struct_types::axi_wr_resp    resp_out_wr,
-	output logic                        resp_ready_wr,      // read slot is response-ready
+	output logic                        resp_ready_wr,      // read-pointer slot has a final response
 
-	// Free flags: manager checks before allocating.
+	// Free flags: manager checks these before allocating.
 	output logic                        slot_free_wr [0:1],
 
 	/*--------------------------------------------------------------------*/
-	/* Read direction  2 slots (symmetric)                               */
-	/* Note: read responses bypass this module entirely and are pushed    */
-	/* directly to rd_data_fifo by the manager. Only the request header  */
-	/* storage and slot-free tracking are used for reads.                 */
+	/* Read direction — 2 slots (symmetric)                               */
+	/* Read responses bypass this module entirely and are pushed directly  */
+	/* to rd_data_fifo by the manager. Only the request header and         */
+	/* slot-free tracking are used here for reads.                         */
 	/*--------------------------------------------------------------------*/
 
 	input  logic                        alloc_rd,
@@ -114,7 +110,7 @@ import struct_types::*;
 /*  Write direction                                                         */
 /*=========================================================================*/
 
-	// Read pointer (drain side).  Alloc pointer lives in the manager.
+	// Drain-side read pointer; the allocation pointer lives in the manager.
 	logic wr_read_ptr;
 
 	always_ff @(posedge clk or negedge rst_n) begin
@@ -209,9 +205,9 @@ import struct_types::*;
 
 /*=========================================================================*/
 /*  Read direction                                                          */
-/*  Response data bypasses this module  the manager pushes read beats     */
-/*  directly to rd_data_fifo. Only the request header and slot-free state  */
-/*  are tracked here.                                                       */
+/*  Read responses bypass this module — the manager pushes each beat       */
+/*  directly to rd_data_fifo. Only the request header and slot-free        */
+/*  state are tracked here.                                                 */
 /*=========================================================================*/
 
 	logic rd_read_ptr;

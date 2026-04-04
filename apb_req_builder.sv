@@ -2,14 +2,13 @@
  * File          : apb_req_builder.sv
  * Project       : RTL
  * Author        : epsdso
- * Description   : Packs raw disassembler outputs into apb_struct format.
+ * Description   : Packs raw disassembler outputs into apb_struct records.
  *
  * RESPONSIBILITY
  * ==============
- * The disassembler answers "what are the two sub-transactions?", producing
- * raw fields (addr, wdata, pstrb, valid).
- * This module answers "what does each APB request packet look like?",
- * assembling those fields into apb_struct records ready for the FIFO.
+ * The disassembler produces raw fields (addr, wdata, pstrb, valid) for each
+ * APB half. This module packs those fields into apb_struct records ready to
+ * push into the APB request FIFO.
  *
  * This module is purely combinational and owns no state.
  *
@@ -27,13 +26,11 @@
  *      v
  *   manager             <- sequences pushes into the APB request FIFO
  *
- * The manager instantiates both disassembler and apb_req_builder.
- *
  * RESPONSE FIELDS
  * ===============
- * pready, prdata, pslverr are response fields driven by the APB slave.
- * On the request path they are initialized to 0. The APB master will
- * overwrite them when the slave responds.
+ * pready, prdata, and pslverr are response fields filled in by the APB slave.
+ * On the request path they are initialised to 0 here; apb_master overwrites
+ * them when the slave responds.
  *------------------------------------------------------------------------------*/
 `timescale 1ns/1ps
 
@@ -62,8 +59,7 @@ import struct_types::*;
 		apb_lsb.pwrite  = is_wr;
 		apb_lsb.pwdata  = lsb_wdata;
 		apb_lsb.pstrb   = lsb_pstrb;
-		// Response fields: initialized to 0 on the request path;
-		// filled in by the APB slave after the transaction completes.
+		// Response fields: zeroed here; filled in by the APB slave via apb_master.
 		apb_lsb.pready  = 1'b0;
 		apb_lsb.prdata  = '0;
 		apb_lsb.pslverr = 1'b0;

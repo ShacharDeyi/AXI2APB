@@ -3,7 +3,20 @@
  * Project       : RTL
  * Author        : epsdso
  * Creation date : Nov 3, 2025
- * Description   :
+ * Description   : AXI read-side interface adapter.
+ *
+ *   Bridges the two AXI read channels (AR, R) to the FIFO interfaces
+ *   used by the rest of the bridge:
+ *
+ *     AR channel : accepts read addresses; pushes axi_rd_req structs into
+ *                  the read-request FIFO. arready is driven from !full.
+ *
+ *     R channel  : drives read data beats back to the AXI master from the
+ *                  read-data FIFO. rvalid is driven from !empty; the FIFO
+ *                  is popped on the AXI handshake.
+ *
+ *   This module is stateless — it contains no FSMs or counters, only
+ *   combinational glue between the AXI bus and the FIFO control signals.
  *------------------------------------------------------------------------------*/
 `timescale 1ns/1ps
 
@@ -24,10 +37,11 @@ import struct_types::*;
 	input  logic              		data_fifo_empty
 );
 /*------------------------------READ REQ----------------------------------*/
-	// AXI Protocol Logic: Ready only if the FIFO has room
+	// arready is high whenever the request FIFO has room.
+	// The AXI AR handshake completes when arvalid && arready.
 	assign axi.arready = !req_fifo_full;
 
-	// Prepare the packet
+	// Pack the incoming AXI AR signals into a struct for the FIFO.
 	always_comb begin
 		req_fifo_data_out.arid    = axi.arid;
 		req_fifo_data_out.araddr  = axi.araddr;
@@ -35,15 +49,15 @@ import struct_types::*;
 		req_fifo_data_out.arsize  = axi.arsize;
 	end
 
-	// We push only when Valid and Ready handshake occurs
+	// Push on every accepted handshake.
 	assign req_fifo_push_n = !(axi.arvalid && axi.arready);
 	
 	
 /*------------------------------READ DATA----------------------------------*/	
-	// AXI Protocol Logic: Ready only if the FIFO has room
+	// rvalid is high whenever the data FIFO has an entry waiting.
 	assign axi.rvalid = !data_fifo_empty;
 
-	// Prepare the packet
+	// Forward the FIFO head directly onto the AXI R channel.
 	always_comb begin
 		axi.rid = data_fifo_data_in.rid;
 		axi.rdata = data_fifo_data_in.rdata;
@@ -51,7 +65,7 @@ import struct_types::*;
 		axi.rlast = data_fifo_data_in.rlast;
 	end
 
-	// We push only when Valid and Ready handshake occurs
+	// Pop the FIFO on every accepted R-channel handshake.
 	assign data_fifo_pop_n = !(axi.rvalid && axi.rready);
 
 endmodule

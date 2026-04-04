@@ -3,49 +3,45 @@
  * Project       : RTL
  * Author        : epsdso
  * Creation date : Oct 25, 2025
- * Description   : Splits one 64-bit AXI beat into two independent 32-bit halves.
+ * Description   : Splits one 64-bit AXI beat into two independent 32-bit APB
+ *                 sub-transactions.
  *
  * RESPONSIBILITY
  * ==============
- * This module answers one question: given a beat's address, size, direction,
- * and write data, what are the two 32-bit sub-transactions that need to happen?
+ * Given a beat's address, size, direction, and write data, determines which
+ * of the two 32-bit APB halves (LSB and/or MSB) need to be issued and computes
+ * their individual address, data, and strobe fields.
+ * Outputs raw fields only — no apb_struct packing.
+ * apb_req_builder packs these fields into apb_structs for the FIFO.
  *
- * It outputs RAW FIELDS only -- no apb_struct packing.
- * apb_req_builder is responsible for assembling those fields into apb_structs.
- * The manager instantiates both modules and controls push/pop timing.
+ * HALF SELECTION
+ * ==============
+ * size=3 (8-byte beat): the beat spans the full 64-bit word → both halves active.
+ * size<3 (narrow beat): the beat fits in one 32-bit half, selected by beat_addr[2]:
+ *   beat_addr[2]=0 → LSB half only (address unchanged)
+ *   beat_addr[2]=1 → MSB half only (address already points to the upper word)
  *
- * THEORY OF OPERATION
- * ===================
- * How many APB transactions are needed per beat depends on beat_size:
- *
- *   size = 3 (8B) : beat spans the full 64-bit word  -> both halves active
- *   size < 3      : beat fits in one 32-bit half
- *                   bit[2] of beat_addr selects which half:
- *                     0  ->  LSB only
- *                     1  ->  MSB only
- * 
  * VALID FLAGS
  * ===========
- *   Reads:  valid = half is active
- *   Writes: valid = half is active AND at least one strobe lane is set
- *           (no point issuing a write that touches no bytes)
- * ADDRESS
- * ============
+ * Reads:  a half is valid when it is active.
+ * Writes: a half is valid when it is active AND at least one of its strobe
+ *         lanes is set (no point issuing a write that touches no bytes).
+ *
+ * ADDRESS GENERATION
+ * ==================
  * The manager computes beat_addr each beat as:
  *   beat_addr = base_addr + beat_index * (1 << beat_size)
- * This module receives beat_addr directly and does NOT need base_addr or
- * beat_index separately.
- * The lsb transaction keeps the original beat's address.
- * The msb transaction is added 4 to the address if both lsb & msb are active.
- * Otherwise, it gets the original address.
+ * LSB address = beat_addr (offset +0).
+ * MSB address = beat_addr + 4 when both halves are active;
+ *               = beat_addr when only MSB is active (narrow beat, addr already
+ *               points to the upper word per the AXI narrow-transfer rules).
  *
- * WRITE STROBE MAPPING  (AXI wstrb[7:0] -> APB pstrb[3:0])
+ * WRITE STROBE MAPPING  (AXI wstrb[7:0] → APB pstrb[3:0])
  * ====================
- *   LSB: wstrb[3:0] -> pstrb[3:0]  (direct, same byte lanes)
- *   MSB: wstrb[7:4] -> pstrb[3:0]  (shift DOWN by 4;
- *        APB pstrb always indexes within its own 32-bit word,
- *        so AXI byte-lane 4 becomes APB byte-lane 0 of the MSB transaction)
- *
+ *   LSB: wstrb[3:0] → pstrb[3:0]  (direct mapping)
+ *   MSB: wstrb[7:4] → pstrb[3:0]  (shifted down by 4 because APB pstrb always
+ *        indexes bytes within its own 32-bit word; AXI byte-lane 4 becomes
+ *        APB byte-lane 0 from the slave's perspective)
  *------------------------------------------------------------------------------*/
 `timescale 1ns/1ps
 
@@ -79,11 +75,8 @@ import struct_types::*;
 	/*=========================================================================*/
 	/*  Half-activation                                                        */
 	/*=========================================================================*/
-	// size==3: AXI bus is 64-bit (8 bytes) and our APB bus is 32-bit (4 bytes).
-	//			is the only case where the beat is wide enough to touch **both** APB halves. 
-	//			Every smaller size fits entirely within one 32-bit half.
-	// 			
-	// size< 3: need to select which half is active
+	// size==3: beat is 8 bytes — spans both APB 32-bit halves.
+	// size< 3: beat fits in one half, selected by beat_addr[2].
 	wire full_width = (beat_size == 3'd3);
 	wire lsb_active = full_width | (beat_addr[2] == 1'b0);
 	wire msb_active = full_width | (beat_addr[2] == 1'b1);
@@ -93,34 +86,35 @@ import struct_types::*;
 	/*=========================================================================*/
 
 	always_comb begin
-		// Zero everything for reads since not needed
-		
+		// For reads, data and strobes are irrelevant — zero them.
+
 		// ---- LSB half ----
-		// wdata[31:0] and wstrb[3:0] are the lower lanes by default.
 		lsb_wdata = is_wr ? wdata[PDATA_WIDTH-1:0]          : '0;
 		lsb_pstrb = is_wr ? wstrb[PSTRB_WIDTH-1:0]          : '0;
 
 		// ---- MSB half ----
-		// wdata[63:32] goes directly into the MSB APB word.
-		// wstrb[7:4] SHIFTS DOWN to pstrb[3:0] because APB pstrb indexes
-		// bytes within its own 32-bit word (byte 4 of the AXI bus becomes byte 0 from the APB slave's perspective).
+		// wstrb[7:4] shifts down to pstrb[3:0] because APB pstrb indexes
+		// bytes within its own 32-bit word.
 		msb_wdata = is_wr ? wdata[DATA_WIDTH-1:PDATA_WIDTH]  : '0;
 		msb_pstrb = is_wr ? wstrb[WSTRB_WIDTH-1:PSTRB_WIDTH] : '0;
 	end
 
 	/*=========================================================================*/
-	/*  Valid flags & address generation                                                            */
+	/*  Valid flags & address generation                                       */
 	/*=========================================================================*/
 
 	always_comb begin
 		// A half is valid when:
-		//   (a) the beat contains that half (lsb/msb_active), AND
-		//   (b) for writes: at least one strobe byte is set in that half
-		//       for reads: always proceed if the half is active
+		//   (a) the beat covers that half (lsb/msb_active), AND
+		//   (b) for writes: at least one strobe byte is set in that half;
+		//       for reads: always valid if the half is active.
 		valid_lsb = lsb_active & (is_wr ? |wstrb[PSTRB_WIDTH-1:0]          : 1'b1);
 		valid_msb = msb_active & (is_wr ? |wstrb[WSTRB_WIDTH-1:PSTRB_WIDTH] : 1'b1);
 		lsb_addr = beat_addr;  // offset +0
-		msb_addr = (valid_msb & !valid_lsb) ? beat_addr : (beat_addr + 32'd4); //offset + 4 if lsb valid, if not, according to spec addr will be already given.
+		// MSB address: +4 when both halves are active (full-width beat).
+		// When only MSB is active (narrow beat), beat_addr already points to
+		// the upper 32-bit word, so no offset is added.
+		msb_addr = (valid_msb & !valid_lsb) ? beat_addr : (beat_addr + 32'd4);
 
 	end
 

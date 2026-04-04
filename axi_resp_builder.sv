@@ -6,11 +6,9 @@
  *
  * RESPONSIBILITY
  * ==============
- * The assembler answers "what are the response fields?", producing raw
- * signals (rdata, rresp, bresp).
- * This module answers "what does each AXI response packet look like?",
- * adding manager metadata (transaction_id, is_last) and packing everything
- * into axi_rd_data / axi_wr_resp structs ready to push into the FIFOs.
+ * The assembler produces raw response fields (rdata, resp). This module adds
+ * manager-side metadata (transaction_id, is_last) and packs everything into
+ * axi_rd_data and axi_wr_resp structs ready to push into the response FIFOs.
  *
  * This module is purely combinational and owns no state.
  *
@@ -32,9 +30,9 @@
  * ========
  * transaction_id : the AXI ID of the original request (arid or awid),
  *                  preserved by the manager across the APB round-trip.
- * is_last        : rlast flag for the read channel, asserted on the final
- *                  beat of a burst. Comes from the manager's beat counter.
- *                  Not needed for write responses (no wlast equivalent on B channel).
+ * is_last        : the rlast flag for the read channel, asserted on the final
+ *                  beat of a burst. Not needed for write responses (no rlast
+ *                  equivalent on the B channel).
  *------------------------------------------------------------------------------*/
 `timescale 1ns/1ps
 
@@ -62,7 +60,7 @@ import struct_types::*;
 		rd_data.rlast = is_last;
 
 		// ---- Write response ----
-		// No rdata or rlast on the write response channel -- just ID and response code.
+		// The B channel carries only ID and response code — no data or last flag.
 		wr_resp.bid   = transaction_id;
 		wr_resp.bresp = resp;
 	end

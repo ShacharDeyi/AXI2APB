@@ -3,7 +3,23 @@
  * Project       : RTL
  * Author        : epsdso
  * Creation date : Nov 3, 2025
- * Description   : pushes write requests
+ * Description   : AXI write-side interface adapter.
+ *
+ *   Bridges the three AXI write channels (AW, W, B) to the FIFO interfaces
+ *   used by the rest of the bridge:
+ *
+ *     AW channel : accepts write addresses; pushes axi_wr_req structs into
+ *                  the write-request FIFO. awready is driven from !full.
+ *
+ *     W channel  : accepts write data beats; pushes axi_wr_data structs into
+ *                  the write-data FIFO. wready is driven from !full.
+ *
+ *     B channel  : drives write responses back to the AXI master from the
+ *                  write-response FIFO. bvalid is driven from !empty;
+ *                  the FIFO is popped on the AXI handshake.
+ *
+ *   This module is stateless — it contains no FSMs or counters, only
+ *   combinational glue between the AXI bus and the FIFO control signals.
  *------------------------------------------------------------------------------*/
 `timescale 1ns/1ps
 
@@ -27,10 +43,10 @@ import struct_types::*;
 	input  logic              			resp_fifo_empty
 );
 /*------------------------------WRITE REQ----------------------------------*/
-	// AXI Protocol Logic: Ready only if the FIFO has room
+	// awready is high whenever the request FIFO has room.
 	assign axi.awready = !req_fifo_full;
 
-	// Prepare the packet
+	// Pack the incoming AXI AW signals into a struct for the FIFO.
 	always_comb begin
 		req_fifo_data_out.awid    = axi.awid;
 		req_fifo_data_out.awaddr  = axi.awaddr;
@@ -38,33 +54,34 @@ import struct_types::*;
 		req_fifo_data_out.awsize  = axi.awsize;
 	end
 
-	// We push only when Valid and Ready handshake occurs
+	// Push on every accepted AW handshake.
 	assign req_fifo_push_n = !(axi.awvalid && axi.awready);
 	
 /*------------------------------WRITE DATA----------------------------------*/
+	// wready is high whenever the data FIFO has room.
 	assign axi.wready = !data_fifo_full;
 
-	// Prepare the packet
+	// Pack the incoming AXI W signals into a struct for the FIFO.
 	always_comb begin
 		data_fifo_data_out.wdata  = axi.wdata;
 		data_fifo_data_out.wstrb  = axi.wstrb;
 		data_fifo_data_out.wlast  = axi.wlast;
 	end
 
-	// We push only when Valid and Ready handshake occurs
+	// Push on every accepted W handshake.
 	assign data_fifo_push_n = !(axi.wvalid && axi.wready);
 	
 	/*------------------------------WRITE RESP----------------------------------*/
-	// AXI Protocol Logic: Ready only if the FIFO has room
+	// bvalid is high whenever the response FIFO has an entry waiting.
 	assign axi.bvalid = !resp_fifo_empty;
 
-	// Prepare the packet
+	// Forward the FIFO head directly onto the AXI B channel.
 	always_comb begin
 		axi.bid 	= resp_fifo_data_out.bid;
 		axi.bresp 	= resp_fifo_data_out.bresp;
 	end
 
-	// We pop only when Valid and Ready handshake occurs
+	// Pop the FIFO on every accepted B-channel handshake.
 	assign resp_fifo_pop_n = !(axi.bvalid && axi.bready);
 
 endmodule

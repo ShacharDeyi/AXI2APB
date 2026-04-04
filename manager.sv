@@ -12,7 +12,7 @@
  *   Read  pipeline   handles AXI read  transactions exclusively.
  *
  * Both pipelines can be in DISPATCH or WAIT_RESP simultaneously, pushing
- * APB sub-requests to the shared APB req FIFO.  Per-cycle push arbitration
+ * APB sub-requests to the shared APB req FIFO. Per-cycle push arbitration
  * gives writes priority over reads (subject to the hazard and beat-atomicity
  * rules described below).
  *
@@ -20,8 +20,8 @@
  * SLOT LIFECYCLE (per pipeline)
  * ============================================================================
  *
- *  IDLE      : No active slot.  Waits for a request in the relevant AXI FIFO
- *              and a free reg-file slot.  The next request is not popped until
+ *  IDLE      : No active slot. Waits for a request in the relevant AXI FIFO
+ *              and a free reg-file slot. The next request is not popped until
  *              the previous slot's last beat is in the APB req FIFO
  *              (all_beats_pushed), guaranteeing in-order APB issue.
  *
@@ -32,15 +32,17 @@
  *                - the slot transitions implicitly to WAIT_RESP (tracked via
  *                  the per-slot beat-state arrays, not a separate FSM state)
  *
- *  WAIT_RESP : Collects APB responses routed back via the 3-bit sideband tag.
+ *  WAIT_RESP : Collects APB responses routed back via the sideband tag.
  *              On beat complete: assembles AXI response, writes to reg file.
  *              Non-last beat: returns to DISPATCH for the next beat.
- *              Last beat:     marks reg-file slot response-ready; slot drains
- *                             to AXI slave independently.
+ *              Last beat: marks reg-file slot response-ready; 
+ *                         slot drains to AXI slave independently.
  *
  * ============================================================================
- * APB SIDEBAND TAG  (3 bits)
+ * APB SIDEBAND TAG
  * ============================================================================
+ *
+ * Helps to keep track of the requests sent to the APB
  *
  *   { is_wr [2], slot_idx [1], is_msb [0] }
  *
@@ -52,21 +54,21 @@
  * HAZARD POLICY  (first-come-first-served, same cache-line)
  * ============================================================================
  *
- *   When a read and a write target the same 256-byte cache line (addr[31:8]),
+ *   When a read and a write target the same 64-byte cache line (addr[31:6]),
  *   the pipeline that arrived first completes all of its APB beats before the
- *   other is allowed to start.  "Arrived first" means entering DISPATCH one
- *   or more cycles earlier.
+ *   other is allowed to start. "Arrived first" means entering DISPATCH one
+ *   or more cycles earlier. 
  *
  *   Enforcement has two layers:
  *     1. FSM gate (pre-DISPATCH): rd_addr_hazard blocks rd_can_accept while
  *        any live write slot covers the same cache line; wr_addr_hazard does
- *        the symmetric check for writes.  Both signals use a combinational
+ *        the symmetric check for writes. Both signals use a combinational
  *        forward-look (wr/rd_slot_occupied) so the hazard is visible the same
  *        cycle the conflicting transaction is first accepted, preventing
  *        simultaneous entry into DISPATCH.
  *     2. Push-arbiter gate (in-DISPATCH): rd_addr_hazard also suppresses read
  *        APB pushes when a conflicting write is in DISPATCH (handles the case
- *        where both entered DISPATCH in the same cycle).  An in-progress beat
+ *        where both entered DISPATCH in the same cycle). An in-progress beat
  *        (LSB already pushed, MSB pending) is always allowed to complete to
  *        preserve LSB/MSB atomicity in the APB FIFO.
  *
@@ -178,12 +180,12 @@ import struct_types::*;
 	logic         rd_alloc_ptr;
 
 	/*=====================================================================*/
-	/*  Per-slot beat state  write pipeline  [0:1]                       */
+	/*  Per-slot beat state write pipeline  [0:1]                       */
 	/*  Indexed by slot_idx, not by wr_active_slot alone, because slot 0  */
 	/*  may be in WAIT_RESP while slot 1 is in DISPATCH simultaneously.   */
 	/*=====================================================================*/
 
-	logic [7:0]               wr_beat_index      [0:1];
+	logic [MAX_LEN-1:0]       wr_beat_index       [0:1];
 	logic                     wr_burst_err        [0:1]; // accumulated bresp error
 	logic                     wr_req_lsb_pushed   [0:1];
 	logic                     wr_req_msb_pushed   [0:1];
@@ -197,12 +199,14 @@ import struct_types::*;
 	logic                     wr_resp_msb_done    [0:1];
 	logic                     wr_all_beats_pushed [0:1]; // last beat in APB FIFO
 	logic                     wr_data_latched     [0:1]; // wr_data valid for beat
+	
+	struct_types::axi_wr_data wr_data_q [0:1]; // wr_data storage per slot (refreshed each beat)
 
 	/*=====================================================================*/
 	/*  Per-slot beat state  read pipeline  [0:1]                        */
 	/*=====================================================================*/
 
-	logic [7:0]               rd_beat_index      [0:1];
+	logic [MAX_LEN-1:0]       rd_beat_index      [0:1];
 	logic                     rd_req_lsb_pushed  [0:1];
 	logic                     rd_req_msb_pushed  [0:1];
 	logic                     rd_req_lsb_pending [0:1];
@@ -214,9 +218,6 @@ import struct_types::*;
 	logic                     rd_resp_msb_err    [0:1];
 	logic                     rd_resp_msb_done   [0:1];
 	logic                     rd_all_beats_pushed[0:1];
-
-	// wr_data storage per slot (refreshed each beat)
-	struct_types::axi_wr_data wr_data_q [0:1];
 
 	/*=====================================================================*/
 	/*  Register file wires                                                */
@@ -280,22 +281,13 @@ import struct_types::*;
 	struct_types::apb_struct  builder_rd_apb_lsb, builder_rd_apb_msb;
 
 	/*=====================================================================*/
-	/*  Assembler / resp-builder wires  write                            */
+	/*  Assembler / resp-builder wires                            */
 	/*=====================================================================*/
 
-	logic [1:0]             asm_wr_rresp;  // unused; bresp is what matters for writes
-	logic [1:0]             asm_wr_bresp;
-
+	logic [1:0]               asm_resp;
+	logic [DATA_WIDTH-1:0]	  asm_rdata;
 	struct_types::axi_wr_resp axi_wr_resp_assembled;
-
-	/*=====================================================================*/
-	/*  Assembler / resp-builder wires  read                             */
-	/*=====================================================================*/
-
-	logic [DATA_WIDTH-1:0]  asm_rd_rdata;
-	logic [1:0]             asm_rd_rresp;
-
-	struct_types::axi_rd_data axi_rd_resp_assembled;
+	struct_types::axi_rd_data axi_rd_resp_assembled;  
 
 	/*=====================================================================*/
 	/*  Combinational derived signals                                      */
@@ -653,102 +645,6 @@ import struct_types::*;
 	);
 
 	/*=====================================================================*/
-	/*  Sub-module: write assembler + resp builder                         */
-	/*  Driven from active write slot's accumulated response data.         */
-	/*=====================================================================*/
-
-	// wr_completing_slot: points to whichever write slot has a completed beat
-	// ready to be assembled and written to the reg file this cycle.
-	// Priority: slot 0 over slot 1 if both complete simultaneously (rare).
-	// Fallback: wr_active_slot when nothing is completing  the assembler
-	// output is unused in that case (rf_resp_wr_en is gated), but the mux
-	// must not default to slot 1 which may be unallocated.
-	logic wr_completing_slot;
-	always_comb begin
-		if (!rf_slot_free_wr[0] &&
-			(wr_req_lsb_pending[0] || wr_req_msb_pending[0]) &&
-			wr_resp_all_done[0] &&
-			(wr_active_slot == 1'b0 || wr_all_beats_pushed[0]))
-			wr_completing_slot = 1'b0;
-		else if (!rf_slot_free_wr[1] &&
-				 (wr_req_lsb_pending[1] || wr_req_msb_pending[1]) &&
-				 wr_resp_all_done[1] &&
-				 (wr_active_slot == 1'b1 || wr_all_beats_pushed[1]))
-			wr_completing_slot = 1'b1;
-		else
-			wr_completing_slot = wr_active_slot;
-	end
-
-	assembler u_assembler_wr (
-		.valid_lsb   (wr_req_lsb_pending [wr_completing_slot]),
-		.valid_msb   (wr_req_msb_pending [wr_completing_slot]),
-		.lsb_prdata  (wr_resp_lsb_data   [wr_completing_slot]),
-		.lsb_pslverr (wr_resp_lsb_err    [wr_completing_slot]),
-		.msb_prdata  (wr_resp_msb_data   [wr_completing_slot]),
-		.msb_pslverr (wr_resp_msb_err    [wr_completing_slot]),
-		.rdata       (),                // unused  writes produce no read data
-		.rresp       (asm_wr_rresp),
-		.bresp       (asm_wr_bresp)
-	);
-
-	axi_resp_builder u_axi_resp_builder_wr (
-		.transaction_id (rf_req_out_wr[wr_completing_slot].awid),
-		.is_last        (wr_is_last[wr_completing_slot]),
-		.rdata          ('0),
-		.rresp          (asm_wr_rresp),
-		.bresp          (wr_burst_err[wr_completing_slot] ? 2'b10 : asm_wr_bresp),
-		.rd_data        (),             // unused on write path
-		.wr_resp        (axi_wr_resp_assembled)
-	);
-
-	/*=====================================================================*/
-	/*  Sub-module: read assembler + resp builder                          */
-	/*  Driven from active read slot's accumulated response data.          */
-	/*=====================================================================*/
-
-	// With pipelined read slots, either slot may have rd_resp_all_done set.
-	// rd_completing_slot: symmetric to wr_completing_slot for the read pipeline.
-	logic rd_completing_slot;
-	always_comb begin
-		// Slot 0 has responses ready: allocated, has in-flight responses
-		// (at least one pending flag set), and all expected halves done.
-		if (!rf_slot_free_rd[0] &&
-			(rd_req_lsb_pending[0] || rd_req_msb_pending[0]) &&
-			rd_resp_all_done[0] &&
-			(rd_active_slot == 1'b0 || rd_all_beats_pushed[0]))
-			rd_completing_slot = 1'b0;
-		else if (!rf_slot_free_rd[1] &&
-				 (rd_req_lsb_pending[1] || rd_req_msb_pending[1]) &&
-				 rd_resp_all_done[1] &&
-				 (rd_active_slot == 1'b1 || rd_all_beats_pushed[1]))
-			rd_completing_slot = 1'b1;
-		else
-			rd_completing_slot = rd_active_slot;
-	end
-
-	assembler u_assembler_rd (
-		.valid_lsb   (rd_req_lsb_pending [rd_completing_slot]),
-		.valid_msb   (rd_req_msb_pending [rd_completing_slot]),
-		.lsb_prdata  (rd_resp_lsb_data   [rd_completing_slot]),
-		.lsb_pslverr (rd_resp_lsb_err    [rd_completing_slot]),
-		.msb_prdata  (rd_resp_msb_data   [rd_completing_slot]),
-		.msb_pslverr (rd_resp_msb_err    [rd_completing_slot]),
-		.rdata       (asm_rd_rdata),
-		.rresp       (asm_rd_rresp),
-		.bresp       ()                 // unused  reads produce no write response
-	);
-
-	axi_resp_builder u_axi_resp_builder_rd (
-		.transaction_id (rf_req_out_rd[rd_completing_slot].arid),
-		.is_last        (rd_is_last[rd_completing_slot]),
-		.rdata          (asm_rd_rdata),
-		.rresp          (asm_rd_rresp),
-		.bresp          ('0),
-		.rd_data        (axi_rd_resp_assembled),
-		.wr_resp        ()              // unused on read path
-	);
-
-	/*=====================================================================*/
 	/*  Sub-module: register file                                          */
 	/*=====================================================================*/
 
@@ -979,6 +875,94 @@ import struct_types::*;
 		rf_alloc_slot_rd  = rd_alloc_ptr;
 		rf_alloc_req_rd   = rd_req_fifo_out;
 	end
+
+	/*=====================================================================*/
+	/*  Sub-module: assembler + resp builder         	                   */
+	/*=====================================================================*/
+	// wr_completing_slot: points to whichever write slot has a completed beat
+	// ready to be assembled and written to the reg file this cycle.
+	// Priority: slot 0 over slot 1 if both complete simultaneously (rare).
+	// Fallback: wr_active_slot when nothing is completing  the assembler
+	// output is unused in that case (rf_resp_wr_en is gated), but the mux
+	// must not default to slot 1 which may be unallocated.
+	logic wr_completing_slot;
+	always_comb begin
+		if (!rf_slot_free_wr[0] &&
+			(wr_req_lsb_pending[0] || wr_req_msb_pending[0]) &&
+			wr_resp_all_done[0] &&
+			(wr_active_slot == 1'b0 || wr_all_beats_pushed[0]))
+			wr_completing_slot = 1'b0;
+		else if (!rf_slot_free_wr[1] &&
+				 (wr_req_lsb_pending[1] || wr_req_msb_pending[1]) &&
+				 wr_resp_all_done[1] &&
+				 (wr_active_slot == 1'b1 || wr_all_beats_pushed[1]))
+			wr_completing_slot = 1'b1;
+		else
+			wr_completing_slot = wr_active_slot;
+	end
+
+	// With pipelined read slots, either slot may have rd_resp_all_done set.
+	// rd_completing_slot: symmetric to wr_completing_slot for the read pipeline.
+	logic rd_completing_slot;
+	always_comb begin
+		// Slot 0 has responses ready: allocated, has in-flight responses
+		// (at least one pending flag set), and all expected halves done.
+		if (!rf_slot_free_rd[0] &&
+			(rd_req_lsb_pending[0] || rd_req_msb_pending[0]) &&
+			rd_resp_all_done[0] &&
+			(rd_active_slot == 1'b0 || rd_all_beats_pushed[0]))
+			rd_completing_slot = 1'b0;
+		else if (!rf_slot_free_rd[1] &&
+				 (rd_req_lsb_pending[1] || rd_req_msb_pending[1]) &&
+				 rd_resp_all_done[1] &&
+				 (rd_active_slot == 1'b1 || rd_all_beats_pushed[1]))
+			rd_completing_slot = 1'b1;
+		else
+			rd_completing_slot = rd_active_slot;
+	end
+	// wr_completing: true when the write pipeline has a beat ready to assemble
+	// this cycle. Evaluated from registered state only (no dependency on the
+	// APB response pop signals) so that it is stable and valid even on the
+	// cycle the final APB response arrives -- at that point the _done flags
+	// have already clocked in from the previous response(s), and the last
+	// half's capture happens in the same always_ff block that checks this.
+	//
+	// Used as the mux select for the shared assembler / axi_resp_builder:
+	//   1 → write pipeline: feed wr_* arrays, use awid, wr_burst_err
+	//   0 → read pipeline:  feed rd_* arrays, use arid, no burst error
+	//
+	// Deliberately NOT derived from apb_tag_fifo_out or apb_resp_pop_n.
+	// Those are FIFO-head signals that reflect the arriving response, not
+	// the accumulated beat state. Using them caused the merged-assembler bug
+	// where wr_resp_all_done was still 0 on the cycle the final response
+	// arrived, flipping the mux to the read side and corrupting ID/resp.	
+	logic wr_completing;
+	always_comb begin
+		wr_completing = !rf_slot_free_wr[wr_completing_slot] &&
+						(wr_req_lsb_pending[wr_completing_slot] || wr_req_msb_pending[wr_completing_slot]) &&
+						wr_resp_all_done[wr_completing_slot] &&
+						(wr_state == ST_WAIT_RESP);
+	end
+
+	assembler u_assembler (
+		.valid_lsb   (wr_completing ? wr_req_lsb_pending[wr_completing_slot] : rd_req_lsb_pending[rd_completing_slot]),
+		.valid_msb   (wr_completing ? wr_req_msb_pending[wr_completing_slot] : rd_req_msb_pending[rd_completing_slot]),
+		.lsb_prdata  (wr_completing ? wr_resp_lsb_data  [wr_completing_slot] : rd_resp_lsb_data  [rd_completing_slot]),
+		.lsb_pslverr (wr_completing ? wr_resp_lsb_err   [wr_completing_slot] : rd_resp_lsb_err   [rd_completing_slot]),
+		.msb_prdata  (wr_completing ? wr_resp_msb_data  [wr_completing_slot] : rd_resp_msb_data  [rd_completing_slot]),
+		.msb_pslverr (wr_completing ? wr_resp_msb_err   [wr_completing_slot] : rd_resp_msb_err   [rd_completing_slot]),
+		.rdata       (asm_rdata),
+		.resp        (asm_resp)
+	);
+
+	axi_resp_builder u_axi_resp_builder (
+		.transaction_id (wr_completing ? rf_req_out_wr[wr_completing_slot].awid : rf_req_out_rd[rd_completing_slot].arid),
+		.is_last        (wr_completing ? wr_is_last[wr_completing_slot] : rd_is_last[rd_completing_slot]),
+		.rdata          (asm_rdata),
+		.resp           (wr_completing ? (wr_burst_err[wr_completing_slot] ? 2'b10 : asm_resp) : asm_resp),
+		.rd_data        (axi_rd_resp_assembled),
+		.wr_resp        (axi_wr_resp_assembled)
+	);
 
 	/*=====================================================================*/
 	/*  Register file drive  response write + valid-set (combinational)   */

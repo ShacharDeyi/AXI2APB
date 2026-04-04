@@ -70,8 +70,7 @@ import struct_types::*;
 
 	// Assembled outputs -- raw fields, no struct packing yet
 	output logic [DATA_WIDTH-1:0]   rdata,          // 64-bit read data (reads only)
-	output logic [RRESP_WIDTH-1:0]  rresp,          // AXI read response code
-	output logic [BRESP_WIDTH-1:0]  bresp           // AXI write response code
+	output logic [RESP_WIDTH-1:0]  resp           // AXI  response code
 );
 
 	/*=========================================================================*/
@@ -110,8 +109,7 @@ import struct_types::*;
 	wire any_err = (valid_lsb & lsb_pslverr) | (valid_msb & msb_pslverr);
 
 	always_comb begin
-		rresp = any_err ? 2'b10 : 2'b00;
-		bresp = any_err ? 2'b10 : 2'b00;
+		resp = any_err ? 2'b10 : 2'b00;
 	end
 
 endmodule

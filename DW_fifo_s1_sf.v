@@ -82,15 +82,4 @@ module DW_fifo_s1_sf #(
 			end
 		end
 	end
-
-	// Simulation-only overflow/underflow warnings
-	// synthesis translate_off
-	always_ff @(posedge clk) begin
-		if (!push_req_n && full)
-			$display("[%0t] FIFO OVERFLOW  in %m", $time);
-		if (!pop_req_n && empty)
-			$display("[%0t] FIFO UNDERFLOW in %m", $time);
-	end
-	// synthesis translate_on
-
 endmodule

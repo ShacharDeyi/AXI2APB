@@ -384,7 +384,7 @@ endtask
 // Prints a self-contained log line with all field values.
 task automatic collect_b(
     output logic [ID_WIDTH-1:0]    bid_out,
-    output logic [BRESP_WIDTH-1:0] bresp_out,
+    output logic [RESP_WIDTH-1:0] bresp_out,
     output time                    t_out
 );
     @(negedge clk);
@@ -421,7 +421,7 @@ endtask
 task automatic collect_r(
     output logic [ID_WIDTH-1:0]    rid_out,
     output logic [DATA_WIDTH-1:0]  rdata_out,
-    output logic [RRESP_WIDTH-1:0] rresp_out,
+    output logic [RESP_WIDTH-1:0] rresp_out,
     output logic                   rlast_out,
     output time                    t_out
 );
@@ -449,7 +449,7 @@ task automatic axi_write_burst(
     input  logic [DATA_WIDTH-1:0]  data [],
     input  logic [WSTRB_WIDTH-1:0] strb [],
     output logic [ID_WIDTH-1:0]    bid_out,
-    output logic [BRESP_WIDTH-1:0] bresp_out,
+    output logic [RESP_WIDTH-1:0] bresp_out,
     output time                    t_bresp
 );
     fork drive_aw(id, addr, len, size); join_none
@@ -465,7 +465,7 @@ task automatic axi_read_burst(
     input  logic [MAX_SIZE-1:0]    size,
     output logic [ID_WIDTH-1:0]    rid_out   [],
     output logic [DATA_WIDTH-1:0]  rdata_out [],
-    output logic [RRESP_WIDTH-1:0] rresp_out [],
+    output logic [RESP_WIDTH-1:0] rresp_out [],
     output logic                   rlast_out [],
     output time                    t_first_r
 );
@@ -510,7 +510,7 @@ initial begin
     // ================================================================
     begin
         logic [ID_WIDTH-1:0]    bid;
-        logic [BRESP_WIDTH-1:0] bresp;
+        logic [RESP_WIDTH-1:0] bresp;
         logic [DATA_WIDTH-1:0]  wd[];
         logic [WSTRB_WIDTH-1:0] ws[];
         time                    t_bresp;
@@ -554,7 +554,7 @@ initial begin
     // ================================================================
     begin
         logic [ID_WIDTH-1:0]    bid;
-        logic [BRESP_WIDTH-1:0] bresp;
+        logic [RESP_WIDTH-1:0] bresp;
         logic [DATA_WIDTH-1:0]  wd[];
         logic [WSTRB_WIDTH-1:0] ws[];
         time                    t_bresp;
@@ -604,7 +604,7 @@ initial begin
     begin
         logic [ID_WIDTH-1:0]    rid[];
         logic [DATA_WIDTH-1:0]  rdata[];
-        logic [RRESP_WIDTH-1:0] rresp[];
+        logic [RESP_WIDTH-1:0] rresp[];
         logic                   rlast[];
         time                    t_first_r;
 
@@ -645,7 +645,7 @@ initial begin
     begin
         logic [ID_WIDTH-1:0]    rid[];
         logic [DATA_WIDTH-1:0]  rdata[];
-        logic [RRESP_WIDTH-1:0] rresp[];
+        logic [RESP_WIDTH-1:0] rresp[];
         logic                   rlast[];
         time                    t_first_r;
 
@@ -701,7 +701,7 @@ initial begin
     // ================================================================
     begin
         logic [ID_WIDTH-1:0]    bid;
-        logic [BRESP_WIDTH-1:0] bresp;
+        logic [RESP_WIDTH-1:0] bresp;
         logic [DATA_WIDTH-1:0]  wd[];
         logic [WSTRB_WIDTH-1:0] ws[];
         time                    t_bresp;
@@ -752,7 +752,7 @@ initial begin
     begin
         logic [ID_WIDTH-1:0]    rid[];
         logic [DATA_WIDTH-1:0]  rdata[];
-        logic [RRESP_WIDTH-1:0] rresp[];
+        logic [RESP_WIDTH-1:0] rresp[];
         logic                   rlast[];
         time                    t_first_r;
 
@@ -800,7 +800,7 @@ initial begin
     // ================================================================
     begin
         logic [ID_WIDTH-1:0]    bid;
-        logic [BRESP_WIDTH-1:0] bresp;
+        logic [RESP_WIDTH-1:0] bresp;
         logic [DATA_WIDTH-1:0]  wd[];
         logic [WSTRB_WIDTH-1:0] ws[];
         time                    t_bresp;
@@ -847,10 +847,10 @@ initial begin
     // ================================================================
     begin
         logic [ID_WIDTH-1:0]    bid;
-        logic [BRESP_WIDTH-1:0] bresp;
+        logic [RESP_WIDTH-1:0] bresp;
         logic [ID_WIDTH-1:0]    rid[];
         logic [DATA_WIDTH-1:0]  rdata[];
-        logic [RRESP_WIDTH-1:0] rresp[];
+        logic [RESP_WIDTH-1:0] rresp[];
         logic                   rlast[];
         time                    t_bresp, t_first_r, t_tmp;
 
@@ -905,7 +905,7 @@ initial begin
     // ================================================================
     begin
         logic [ID_WIDTH-1:0]    bid_resp[2];
-        logic [BRESP_WIDTH-1:0] bresp_resp[2];
+        logic [RESP_WIDTH-1:0] bresp_resp[2];
         time                    t_resp[2];
 
         $display("\n====== TB_BURST_009: Back-to-back write bursts ======");
@@ -969,7 +969,7 @@ initial begin
     // ================================================================
     begin
         logic [ID_WIDTH-1:0]    bid;
-        logic [BRESP_WIDTH-1:0] bresp;
+        logic [RESP_WIDTH-1:0] bresp;
         logic [DATA_WIDTH-1:0]  wd[];
         logic [WSTRB_WIDTH-1:0] ws[];
         time                    t_bresp;
@@ -1022,10 +1022,10 @@ initial begin
     // ================================================================
     begin
         logic [ID_WIDTH-1:0]    bid   [6];
-        logic [BRESP_WIDTH-1:0] bresp [6];
+        logic [RESP_WIDTH-1:0] bresp [6];
         logic [ID_WIDTH-1:0]    rid[];
         logic [DATA_WIDTH-1:0]  rdata[];
-        logic [RRESP_WIDTH-1:0] rresp[];
+        logic [RESP_WIDTH-1:0] rresp[];
         logic                   rlast[];
         time                    t_bresp[6], t_first_r, t_tmp;
 
@@ -1096,7 +1096,7 @@ initial begin
     // ================================================================
     begin
         logic [ID_WIDTH-1:0]    bid1, bid2;
-        logic [BRESP_WIDTH-1:0] bresp1, bresp2;
+        logic [RESP_WIDTH-1:0] bresp1, bresp2;
         time                    t_b1, t_b2;
 
         $display("\n====== TB_BURST_012: Write-write same CL (serial wr_collision) ======");
@@ -1157,7 +1157,7 @@ initial begin
     // ================================================================
     begin
         logic [ID_WIDTH-1:0]    bid1, bid2;
-        logic [BRESP_WIDTH-1:0] bresp1, bresp2;
+        logic [RESP_WIDTH-1:0] bresp1, bresp2;
         time                    t_b1, t_b2;
 
         $display("\n====== TB_BURST_013: Write-write different CL (concurrent) ======");
@@ -1235,10 +1235,10 @@ initial begin
     // ================================================================
     begin
         logic [ID_WIDTH-1:0]    bid;
-        logic [BRESP_WIDTH-1:0] bresp;
+        logic [RESP_WIDTH-1:0] bresp;
         logic [ID_WIDTH-1:0]    rid[];
         logic [DATA_WIDTH-1:0]  rdata[];
-        logic [RRESP_WIDTH-1:0] rresp[];
+        logic [RESP_WIDTH-1:0] rresp[];
         logic                   rlast[];
         time                    t_bresp, t_first_r, t_tmp;
 

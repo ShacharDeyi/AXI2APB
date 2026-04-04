@@ -369,7 +369,7 @@ endtask
 // bvalid first asserted so the delay can be verified.
 task automatic collect_b(
     output logic [ID_WIDTH-1:0]    bid_out,
-    output logic [BRESP_WIDTH-1:0] bresp_out,
+    output logic [RESP_WIDTH-1:0] bresp_out,
     output time                    t_handshake,
     output time                    t_bvalid_first,
     input  int                     bready_delay_cycles = 0
@@ -424,7 +424,7 @@ task automatic axi_single_write(
     input  int                     w_delay       = 0,
     input  int                     b_delay       = 0,
     output logic [ID_WIDTH-1:0]    bid_out,
-    output logic [BRESP_WIDTH-1:0] bresp_out,
+    output logic [RESP_WIDTH-1:0] bresp_out,
     output time                    t_bvalid_first,
     output time                    t_handshake
 );
@@ -442,7 +442,7 @@ task automatic axi_burst_write(
     input  logic [DATA_WIDTH-1:0]  data [],
     input  logic [WSTRB_WIDTH-1:0] strb [],
     output logic [ID_WIDTH-1:0]    bid_out,
-    output logic [BRESP_WIDTH-1:0] bresp_out,
+    output logic [RESP_WIDTH-1:0] bresp_out,
     output time                    t_bvalid_first,
     output time                    t_handshake
 );
@@ -481,7 +481,7 @@ initial begin
     // ================================================================
     begin
         logic [ID_WIDTH-1:0]    bid;
-        logic [BRESP_WIDTH-1:0] bresp;
+        logic [RESP_WIDTH-1:0] bresp;
         time                    t_bv, t_bh;
 
         $display("\n====== TB_WRITE_001: Single-beat write all-zeros data ======");
@@ -522,7 +522,7 @@ initial begin
     // ================================================================
     begin
         logic [ID_WIDTH-1:0]    bid;
-        logic [BRESP_WIDTH-1:0] bresp;
+        logic [RESP_WIDTH-1:0] bresp;
         time                    t_bv, t_bh;
 
         $display("\n====== TB_WRITE_002: Single-beat write all-ones data ======");
@@ -567,7 +567,7 @@ initial begin
     // ================================================================
     begin
         logic [ID_WIDTH-1:0]    bid;
-        logic [BRESP_WIDTH-1:0] bresp;
+        logic [RESP_WIDTH-1:0] bresp;
         time                    t_bv, t_bh;
 
         $display("\n====== TB_WRITE_003: Write wstrb=8'h00 (no bytes enabled) ======");
@@ -603,7 +603,7 @@ initial begin
     // ================================================================
     begin
         logic [ID_WIDTH-1:0]    bid;
-        logic [BRESP_WIDTH-1:0] bresp;
+        logic [RESP_WIDTH-1:0] bresp;
         time                    t_bv, t_bh;
 
         $display("\n====== TB_WRITE_004: Partial strobe LSB only (wstrb=8'h0F) ======");
@@ -643,7 +643,7 @@ initial begin
     // ================================================================
     begin
         logic [ID_WIDTH-1:0]    bid;
-        logic [BRESP_WIDTH-1:0] bresp;
+        logic [RESP_WIDTH-1:0] bresp;
         time                    t_bv, t_bh;
 
         $display("\n====== TB_WRITE_005: Partial strobe MSB only (wstrb=8'hF0) ======");
@@ -683,7 +683,7 @@ initial begin
     // ================================================================
     begin
         logic [ID_WIDTH-1:0]    bid;
-        logic [BRESP_WIDTH-1:0] bresp;
+        logic [RESP_WIDTH-1:0] bresp;
         time                    t_bv, t_bh;
 
         $display("\n====== TB_WRITE_006: Single-byte strobe LSB (wstrb=8'h01) ======");
@@ -723,7 +723,7 @@ initial begin
     // ================================================================
     begin
         logic [ID_WIDTH-1:0]    bid;
-        logic [BRESP_WIDTH-1:0] bresp;
+        logic [RESP_WIDTH-1:0] bresp;
         time                    t_bv, t_bh;
 
         $display("\n====== TB_WRITE_007: Single-byte strobe MSB (wstrb=8'h80) ======");
@@ -765,7 +765,7 @@ initial begin
     // ================================================================
     begin
         logic [ID_WIDTH-1:0]    bid;
-        logic [BRESP_WIDTH-1:0] bresp;
+        logic [RESP_WIDTH-1:0] bresp;
         time                    t_bv, t_bh;
 
         $display("\n====== TB_WRITE_008: Narrow size=1 (2B) at addr[2]=0 (LSB) ======");
@@ -819,7 +819,7 @@ initial begin
     // ================================================================
     begin
         logic [ID_WIDTH-1:0]    bid;
-        logic [BRESP_WIDTH-1:0] bresp;
+        logic [RESP_WIDTH-1:0] bresp;
         time                    t_bv, t_bh;
 
         $display("\n====== TB_WRITE_009: Narrow size=1 (2B) at addr[2]=1 (MSB) ======");
@@ -856,7 +856,7 @@ initial begin
     // ================================================================
     begin
         logic [ID_WIDTH-1:0]    bid;
-        logic [BRESP_WIDTH-1:0] bresp;
+        logic [RESP_WIDTH-1:0] bresp;
         time                    t_bv, t_bh;
 
         $display("\n====== TB_WRITE_010: Write awid=0x0 (min ID) ======");
@@ -884,7 +884,7 @@ initial begin
     // ================================================================
     begin
         logic [ID_WIDTH-1:0]    bid;
-        logic [BRESP_WIDTH-1:0] bresp;
+        logic [RESP_WIDTH-1:0] bresp;
         time                    t_bv, t_bh;
 
         $display("\n====== TB_WRITE_011: Write awid=0xFFFF_FFFF (max ID) ======");
@@ -916,7 +916,7 @@ initial begin
     // ================================================================
     begin
         logic [ID_WIDTH-1:0]    bid;
-        logic [BRESP_WIDTH-1:0] bresp;
+        logic [RESP_WIDTH-1:0] bresp;
         time                    t_bv, t_bh;
 
         $display("\n====== TB_WRITE_012: SLVERR on LSB only (txn#0) ======");
@@ -953,7 +953,7 @@ initial begin
     // ================================================================
     begin
         logic [ID_WIDTH-1:0]    bid;
-        logic [BRESP_WIDTH-1:0] bresp;
+        logic [RESP_WIDTH-1:0] bresp;
         time                    t_bv, t_bh;
 
         $display("\n====== TB_WRITE_013: SLVERR on MSB only (txn#1) ======");
@@ -990,7 +990,7 @@ initial begin
     // ================================================================
     begin
         logic [ID_WIDTH-1:0]    bid;
-        logic [BRESP_WIDTH-1:0] bresp;
+        logic [RESP_WIDTH-1:0] bresp;
         time                    t_bv, t_bh;
 
         $display("\n====== TB_WRITE_014: SLVERR on both halves ======");
@@ -1034,7 +1034,7 @@ initial begin
     // ================================================================
     begin
         logic [ID_WIDTH-1:0]    bid;
-        logic [BRESP_WIDTH-1:0] bresp;
+        logic [RESP_WIDTH-1:0] bresp;
         logic [DATA_WIDTH-1:0]  wd[];
         logic [WSTRB_WIDTH-1:0] ws[];
         time                    t_bv, t_bh;
@@ -1091,7 +1091,7 @@ initial begin
     // ================================================================
     begin
         logic [ID_WIDTH-1:0]    bid;
-        logic [BRESP_WIDTH-1:0] bresp;
+        logic [RESP_WIDTH-1:0] bresp;
         time                    t_bv, t_bh;
         time                    t_start;
 
@@ -1141,7 +1141,7 @@ initial begin
     // ================================================================
     begin
         logic [ID_WIDTH-1:0]    bid;
-        logic [BRESP_WIDTH-1:0] bresp;
+        logic [RESP_WIDTH-1:0] bresp;
         time                    t_bv, t_bh;
         time                    t_start;
 
@@ -1210,7 +1210,7 @@ initial begin
     // ================================================================
     begin
         logic [ID_WIDTH-1:0]    bid;
-        logic [BRESP_WIDTH-1:0] bresp;
+        logic [RESP_WIDTH-1:0] bresp;
         time                    t_bv, t_bh;
 
         $display("\n====== TB_WRITE_018: B channel back-pressure (bready LOW for 10 cycles) ======");

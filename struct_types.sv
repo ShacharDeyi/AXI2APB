@@ -16,8 +16,7 @@ package struct_types;
     parameter ADDR_WIDTH  = 32;     // AXI address width (bits)
     parameter DATA_WIDTH  = 64;     // AXI data width (bits) -- twice APB width
     parameter ID_WIDTH    = 32;     // AXI transaction ID width (bits)
-    parameter RRESP_WIDTH = 2;      // AXI read response code width
-    parameter BRESP_WIDTH = 2;      // AXI write response code width
+    parameter RESP_WIDTH = 2;       // AXI  response code width
     parameter WSTRB_WIDTH = 8;      // AXI write strobe width (DATA_WIDTH/8)
     parameter MAX_SIZE    = 3;      // AXI size field width (encodes 1-8 bytes)
     parameter MAX_LEN     = 8;      // AXI len field width (encodes burst length)
@@ -51,7 +50,7 @@ package struct_types;
     // B (write response) channel: write response (one per burst, sent after wlast)
     typedef struct packed {
         logic [ID_WIDTH-1:0]    bid;    // echoes awid
-        logic [BRESP_WIDTH-1:0] bresp;  // OKAY=2'b00, SLVERR=2'b10
+        logic [RESP_WIDTH-1:0] bresp;  // OKAY=2'b00, SLVERR=2'b10
     } axi_wr_resp;
 
     /*=========================================================================*/
@@ -70,7 +69,7 @@ package struct_types;
     typedef struct packed {
         logic [ID_WIDTH-1:0]    rid;    // echoes arid
         logic [DATA_WIDTH-1:0]  rdata;  // 64-bit read data
-        logic [RRESP_WIDTH-1:0] rresp;  // OKAY=2'b00, SLVERR=2'b10
+        logic [RESP_WIDTH-1:0] rresp;  // OKAY=2'b00, SLVERR=2'b10
         logic                   rlast;  // last beat of burst
     } axi_rd_data;
 

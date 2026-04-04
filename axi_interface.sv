@@ -11,8 +11,7 @@ interface axi_interface #(
 	parameter ADDR_WIDTH    = 32,
 	parameter DATA_WIDTH    = 64,
 	parameter ID_WIDTH      = 32,
-	parameter RRESP_WIDTH   = 2,
-	parameter BRESP_WIDTH   = 2,
+	parameter RESP_WIDTH   	= 2,
 	parameter MAX_SIZE		= 3,
 	parameter MAX_LEN		= 8
 );
@@ -36,7 +35,7 @@ interface axi_interface #(
 	logic                      	bvalid; /*Valid indicator*/
 	logic                      	bready; /*Ready indicator*/
 	logic [ID_WIDTH-1:0]       	bid; /*Transaction identifier for the write channels*/
-	logic [BRESP_WIDTH-1:0]    	bresp; /*Write response*/
+	logic [RESP_WIDTH-1:0]    	bresp; /*Write response*/
 
 
 
@@ -53,7 +52,7 @@ interface axi_interface #(
 	logic                      rready;
 	logic [ID_WIDTH-1:0]       rid;
 	logic [DATA_WIDTH-1:0]     rdata;
-	logic [RRESP_WIDTH-1:0]    rresp;
+	logic [RESP_WIDTH-1:0]    rresp;
 	logic                      rlast;
 
 

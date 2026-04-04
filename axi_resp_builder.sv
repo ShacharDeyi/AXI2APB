@@ -47,8 +47,7 @@ import struct_types::*;
 
 	// Raw fields from assembler
 	input  logic [DATA_WIDTH-1:0]       rdata,          // assembled 64-bit read data
-	input  logic [RRESP_WIDTH-1:0]      rresp,          // AXI read response code
-	input  logic [BRESP_WIDTH-1:0]      bresp,          // AXI write response code
+	input  logic [RESP_WIDTH-1:0]       resp,          // AXI read response code
 
 	// Packed AXI response structs, ready to push into response FIFOs
 	output struct_types::axi_rd_data    rd_data,        // to axi_rd_data FIFO
@@ -59,13 +58,13 @@ import struct_types::*;
 		// ---- Read response ----
 		rd_data.rid   = transaction_id;
 		rd_data.rdata = rdata;
-		rd_data.rresp = rresp;
+		rd_data.rresp = resp;
 		rd_data.rlast = is_last;
 
 		// ---- Write response ----
 		// No rdata or rlast on the write response channel -- just ID and response code.
 		wr_resp.bid   = transaction_id;
-		wr_resp.bresp = bresp;
+		wr_resp.bresp = resp;
 	end
 
 endmodule

@@ -32,7 +32,7 @@
  * RESPONSE FIELDS
  * ===============
  * pready, prdata, pslverr are response fields driven by the APB slave.
- * On the request path they are initialised to 0. The APB master will
+ * On the request path they are initialized to 0. The APB master will
  * overwrite them when the slave responds.
  *------------------------------------------------------------------------------*/
 `timescale 1ns/1ps

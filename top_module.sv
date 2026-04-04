@@ -185,7 +185,7 @@ import struct_types::*;
     /*  APB request FIFO + sideband tag FIFO                                   */
     /*=========================================================================*/
     // apb_req_queue  : carries full APB request struct to apb_master
-    // apb_tag_queue  : carries 2-bit {slot, is_msb} routing tag in parallel
+    // apb_tag_queue  : routing tag in parallel
     // Both pushed together by manager; tag popped together with apb_resp
     // so manager always knows which slot/half each response belongs to.
 
@@ -204,8 +204,8 @@ import struct_types::*;
     );
 
     DW_fifo_s1_sf #(
-        .width ($bits(apb_tag_t)),      // 2 bits: {slot, is_msb}
-        .depth (FIFO_DEPTH*MAX_LEN*2)                     // must match apb_req_queue depth
+        .width ($bits(apb_tag_t)),
+        .depth (FIFO_DEPTH*MAX_LEN*2)   // must match apb_req_queue depth
     ) apb_tag_queue (
         .clk        (clk),
         .rst_n      (rst_n),
@@ -251,8 +251,7 @@ import struct_types::*;
     /*  Manager                                                                */
     /*=========================================================================*/
     // Owns FSM, beat tracking, and all internal sub-modules:
-    //   disassembler, apb_req_builder, assembler, axi_resp_builder,
-    //   and register_file (2-slot response buffer for 2-outstanding support).
+    //   disassembler, apb_req_builder, assembler, axi_resp_builder and register file.
 
     manager u_manager (
         .clk                (clk),

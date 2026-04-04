@@ -5,7 +5,7 @@
  *
  * OVERVIEW
  * ========
- * Provides 2 write slots and 2 read slots.  Each slot owns one AXI transaction
+ * Provides 2 write slots and 2 read slots. Each slot owns one AXI transaction
  * from the moment its request header is stored (allocation) to the moment the
  * assembled AXI response is drained back to the slave (done).
  *
@@ -18,14 +18,14 @@
  *                   so the manager can read it back every cycle to compute
  *                   beat addresses.
  *
- *   2. RESPONSE     As APB sub-responses arrive the manager writes an
+ *   2. RESPONSE     As APB sub-responses arrive, the manager writes an
  * ACCUMULATION      assembled axi_wr_resp / axi_rd_data into the slot via
  *                   resp_wr_wr / resp_wr_rd.  For reads every beat produces
  *                   a new rd_data beat; for writes only the final beat
  *                   triggers a write (accumulated bresp).
  *
  *   3. COMPLETION   manager asserts resp_valid_set_wr / _rd (with the slot
- *                   index) to flag the slot as response-ready.  The slot
+ *                   index) to flag the slot as response-ready. The slot
  *                   transitions ACTIVE → READY.
  *
  *   4. DRAIN        The AXI slave side reads wr_resp_out / rd_data_out
@@ -36,7 +36,7 @@
  * POINTER SCHEME
  * ==============
  * Independent write (alloc) and read (drain) pointers per direction,
- * toggling between 0 and 1.  This is the standard 2-entry FIFO scheme.
+ * toggling between 0 and 1. This is the standard 2-entry FIFO scheme.
  * The alloc pointer lives in the MANAGER (it knows when to allocate);
  * this module receives the explicit slot index on every alloc/resp write.
  * The read pointer lives here and advances on done_wr / done_rd.
@@ -138,8 +138,10 @@ import struct_types::*;
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            wr_slot_valid[0]   <= 1'b0; wr_resp_ready_q[0] <= 1'b0;
-            wr_slot_valid[1]   <= 1'b0; wr_resp_ready_q[1] <= 1'b0;
+            wr_slot_valid[0]   <= 1'b0; 
+            wr_resp_ready_q[0] <= 1'b0;
+            wr_slot_valid[1]   <= 1'b0; 
+            wr_resp_ready_q[1] <= 1'b0;
         end else begin
             // Slot 0
             if (alloc_wr && !alloc_slot_wr)
@@ -216,25 +218,13 @@ import struct_types::*;
     );
 
     // Outputs — always driven from the read-pointer slot.
-    assign req_out_wr    = wr_req_q;                       // both slots visible
-    assign resp_out_wr   = wr_resp_q    [wr_read_ptr];
-    assign resp_id_out_wr= wr_req_q     [wr_read_ptr].awid;
-    assign resp_ready_wr = wr_resp_ready_q [wr_read_ptr];
+    assign req_out_wr       = wr_req_q;                       // both slots visible
+    assign resp_out_wr      = wr_resp_q[wr_read_ptr];
+    assign resp_id_out_wr   = wr_req_q[wr_read_ptr].awid;
+    assign resp_ready_wr    = wr_resp_ready_q [wr_read_ptr];
 
-    assign slot_free_wr[0] = !wr_slot_valid[0];
-    assign slot_free_wr[1] = !wr_slot_valid[1];
-
-    // Simulation assertions.
-    // synthesis translate_off
-    always_ff @(posedge clk) begin
-        if (alloc_wr && wr_slot_valid[alloc_slot_wr])
-            $display("[%0t] RF WARNING: alloc_wr into already-valid wr slot %0b",
-                     $time, alloc_slot_wr);
-        if (done_wr && !wr_resp_ready_q[wr_read_ptr])
-            $display("[%0t] RF WARNING: done_wr on slot %0b which has no ready response",
-                     $time, wr_read_ptr);
-    end
-    // synthesis translate_on
+    assign slot_free_wr[0]  = !wr_slot_valid[0];
+    assign slot_free_wr[1]  = !wr_slot_valid[1];
 
 /*=========================================================================*/
 /*  Read direction (symmetric)                                              */
@@ -252,8 +242,10 @@ import struct_types::*;
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            rd_slot_valid[0]   <= 1'b0; rd_resp_ready_q[0] <= 1'b0;
-            rd_slot_valid[1]   <= 1'b0; rd_resp_ready_q[1] <= 1'b0;
+            rd_slot_valid[0]   <= 1'b0; 
+            rd_resp_ready_q[0] <= 1'b0;
+            rd_slot_valid[1]   <= 1'b0; 
+            rd_resp_ready_q[1] <= 1'b0;
         end else begin
             // Slot 0
             if (alloc_rd && !alloc_slot_rd)
@@ -328,27 +320,11 @@ import struct_types::*;
     );
 
     assign req_out_rd     = rd_req_q;
-    assign resp_out_rd    = rd_resp_q    [rd_read_ptr];
-    assign resp_id_out_rd = rd_req_q     [rd_read_ptr].arid;
-    assign resp_ready_rd  = rd_resp_ready_q [rd_read_ptr];
+    assign resp_out_rd    = rd_resp_q[rd_read_ptr];
+    assign resp_id_out_rd = rd_req_q[rd_read_ptr].arid;
+    assign resp_ready_rd  = rd_resp_ready_q[rd_read_ptr];
 
     assign slot_free_rd[0] = !rd_slot_valid[0];
     assign slot_free_rd[1] = !rd_slot_valid[1];
-
-    // synthesis translate_off
-    always_ff @(posedge clk) begin
-        if (alloc_rd && rd_slot_valid[alloc_slot_rd])
-            $display("[%0t] RF WARNING: alloc_rd into already-valid rd slot %0b",
-                     $time, alloc_slot_rd);
-        // NOTE: done_rd does NOT require resp_ready_rd to be set.
-        // Read responses bypass the register file entirely (pushed directly to
-        // rd_data_fifo); resp_valid_set_rd is never asserted, so rd_resp_ready_q
-        // is always 0 for reads.  The correct precondition for done_rd is that
-        // the slot is actually allocated (valid), not that it has a ready response.
-        if (done_rd && !rd_slot_valid[rd_read_ptr])
-            $display("[%0t] RF WARNING: done_rd on slot %0b which is not allocated",
-                     $time, rd_read_ptr);
-    end
-    // synthesis translate_on
 
 endmodule

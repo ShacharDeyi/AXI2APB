@@ -16,13 +16,6 @@
  *
  * THEORY OF OPERATION
  * ===================
- * AXI data width = 64 bits. APB data width = 32 bits.
- * Every AXI beat maps to an 8-byte-aligned block in memory containing
- * exactly two 32-bit APB words:
- *
- *   LSB word  ->  address with bit[2] = 0  (lower 4 bytes, offset +0)
- *   MSB word  ->  address with bit[2] = 1  (upper 4 bytes, offset +4)
- *
  * How many APB transactions are needed per beat depends on beat_size:
  *
  *   size = 3 (8B) : beat spans the full 64-bit word  -> both halves active
@@ -30,18 +23,21 @@
  *                   bit[2] of beat_addr selects which half:
  *                     0  ->  LSB only
  *                     1  ->  MSB only
- *
- * BEAT ADDRESS
+ * 
+ * VALID FLAGS
+ * ===========
+ *   Reads:  valid = half is active
+ *   Writes: valid = half is active AND at least one strobe lane is set
+ *           (no point issuing a write that touches no bytes)
+ * ADDRESS
  * ============
  * The manager computes beat_addr each beat as:
  *   beat_addr = base_addr + beat_index * (1 << beat_size)
  * This module receives beat_addr directly and does NOT need base_addr or
  * beat_index separately.
- *
- * APB ADDRESS DERIVATION
- * ======================
- *   lsb_addr = { beat_addr[31:3], 3'b000 }  -- 4-byte aligned, lower word
- *   msb_addr = { beat_addr[31:3], 3'b100 }  -- 4-byte aligned, upper word (+4)
+ * The lsb transaction keeps the original beat's address.
+ * The msb transaction is added 4 to the address if both lsb & msb are active.
+ * Otherwise, it gets the original address.
  *
  * WRITE STROBE MAPPING  (AXI wstrb[7:0] -> APB pstrb[3:0])
  * ====================
@@ -50,11 +46,6 @@
  *        APB pstrb always indexes within its own 32-bit word,
  *        so AXI byte-lane 4 becomes APB byte-lane 0 of the MSB transaction)
  *
- * VALID FLAGS
- * ===========
- *   Reads:  valid = half is active
- *   Writes: valid = half is active AND at least one strobe lane is set
- *           (no point issuing a write that touches no bytes)
  *------------------------------------------------------------------------------*/
 `timescale 1ns/1ps
 
@@ -88,13 +79,11 @@ import struct_types::*;
 	/*=========================================================================*/
 	/*  Half-activation                                                        */
 	/*=========================================================================*/
-	//
 	// size==3: AXI bus is 64-bit (8 bytes) and our APB bus is 32-bit (4 bytes).
 	//			is the only case where the beat is wide enough to touch **both** APB halves. 
 	//			Every smaller size fits entirely within one 32-bit half.
 	// 			
-	// size< 3: need to select which half is actived
-	//			do it by address alignment (to 8bytes)
+	// size< 3: need to select which half is active
 	wire full_width = (beat_size == 3'd3);
 	wire lsb_active = full_width | (beat_addr[2] == 1'b0);
 	wire msb_active = full_width | (beat_addr[2] == 1'b1);

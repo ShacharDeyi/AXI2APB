@@ -2502,6 +2502,52 @@ import struct_types::*;
 
 		$display("\n--- Priority 5 (Backpressure) done (%0d pass, %0d fail) ---\n",
 				 pass_count, fail_count);
+		/*---------------------------------------------------------------------*/
+		/* P6-1  Multi-beat burst, last beat LSB-only valid                    */
+		/*                                                                     */
+		/* 4-beat write burst (awlen=3, size=3).  Beats 0-2 use wstrb=8'hFF  */
+		/* (both APB halves active, 2 sub-txns each).  Beat 3 (wlast) uses   */
+		/* wstrb=8'h0F (only LSB lanes set) so the disassembler suppresses    */
+		/* the MSB half: exactly 1 APB sub-txn is issued for the last beat.  */
+		/*                                                                     */
+		/* Expected APB sub-txn count = 3*2 + 1 = 7.                         */
+		/* Expected BRESP = OKAY (no errors injected).                        */
+		/*---------------------------------------------------------------------*/
+		begin
+			logic [31:0] bid;
+			logic [1:0]  bresp;
+			int          base_cnt;
+			localparam int P61_BEATS     = 4;
+			localparam int P61_FULL_BEATS = P61_BEATS - 1; // beats 0..2: both halves
+			localparam int P61_EXPECTED_APB = P61_FULL_BEATS * 2 + 1; // 7
+
+			base_cnt = apb_txn_cnt;
+
+			fork
+				// Thread A: AW channel
+				axi_send_aw(32'hA100_0000, 32'hB1, 8'(P61_BEATS - 1), 3'd3);
+
+				// Thread B: W channel  beats 0-2 full width, beat 3 LSB only
+				begin
+					for (int b = 0; b < P61_BEATS; b++) begin
+						logic [7:0] strb;
+						strb = (b == P61_BEATS - 1) ? 8'h0F : 8'hFF;
+						axi_send_w(64'hB1B1_0000_0000_0000 + b,
+								   strb,
+								   (b == P61_BEATS - 1) ? 1'b1 : 1'b0);
+					end
+				end
+			join
+
+			axi_collect_b(bid, bresp);
+
+			check("P6-1 last-beat LSB-only: BRESP=OKAY",   bresp === 2'b00);
+			check("P6-1 last-beat LSB-only: bid matches",  bid   === 32'hB1);
+			check("P6-1 last-beat LSB-only: APB sub-txn count = 7",
+				  (apb_txn_cnt - base_cnt) === P61_EXPECTED_APB);
+		end
+
+		wait_idle();
 		
 		/*=====================================================================*/
 		/* FINAL SUMMARY                                                       */

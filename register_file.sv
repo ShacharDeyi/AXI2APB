@@ -13,7 +13,7 @@
  * ==============
  *   1. ALLOCATION   manager asserts alloc_wr / alloc_rd, supplies the AXI
  *                   request header and the slot index (alloc_slot_wr/rd).
- *                   The slot transitions from FREE → ACTIVE.
+ *                   The slot transitions from FREE -> ACTIVE.
  *                   The request header is stored in a DW03_reg_s_pl instance
  *                   so the manager can read it back every cycle to compute
  *                   beat addresses.
@@ -26,11 +26,11 @@
  *
  *   3. COMPLETION   manager asserts resp_valid_set_wr / _rd (with the slot
  *                   index) to flag the slot as response-ready. The slot
- *                   transitions ACTIVE → READY.
+ *                   transitions ACTIVE -> READY.
  *
  *   4. DRAIN        The AXI slave side reads wr_resp_out / rd_data_out
  *                   (always the read-pointer slot) and asserts done_wr /
- *                   done_rd.  The slot transitions READY → FREE and the
+ *                   done_rd.  The slot transitions READY -> FREE and the
  *                   read pointer advances.
  *
  * POINTER SCHEME
